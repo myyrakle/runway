@@ -29,12 +29,11 @@ class BatchAnalyzeRequest(BaseModel):
 
 
 class InvocationRequest(BaseModel):
-    text: str | None = Field(None, description="Single text to analyze")
-    texts: list[str] | None = Field(
+    text: str | list[str] | None = Field(
         None,
         min_length=1,
         max_length=MAX_BATCH_ITEMS,
-        description="Batch texts to analyze",
+        description="Text or batch texts to analyze",
     )
     instances: list[str] | None = Field(
         None,
@@ -49,15 +48,14 @@ class InvocationRequest(BaseModel):
     def validate_payload(self) -> "InvocationRequest":
         provided = [
             self.text is not None,
-            self.texts is not None,
             self.instances is not None,
         ]
         if sum(provided) != 1:
-            raise ValueError("Provide exactly one of text, texts, or instances")
+            raise ValueError("Provide exactly one of text or instances")
         return self
 
     def as_single_request(self) -> AnalyzeRequest:
-        if self.text is None:
+        if not isinstance(self.text, str):
             raise ValueError("InvocationRequest does not contain a single text")
         return AnalyzeRequest(
             text=self.text,
@@ -66,7 +64,7 @@ class InvocationRequest(BaseModel):
         )
 
     def as_batch_request(self) -> BatchAnalyzeRequest:
-        texts = self.texts if self.texts is not None else self.instances
+        texts = self.text if isinstance(self.text, list) else self.instances
         if texts is None:
             raise ValueError("InvocationRequest does not contain batch texts")
         return BatchAnalyzeRequest(

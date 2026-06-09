@@ -87,7 +87,7 @@ SageMaker `/invocations` 배치 요청:
 ```bash
 curl -X POST localhost:8001/invocations \
   -H 'Content-Type: application/json' \
-  -d '{"texts": ["The battery life is terrible", "The screen is great"], "aspect": "overall"}'
+  -d '{"text": ["The battery life is terrible", "The screen is great"], "aspect": "overall"}'
 ```
 
 SageMaker-style `instances` payload도 같은 배치 경로를 사용한다.

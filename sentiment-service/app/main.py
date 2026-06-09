@@ -87,7 +87,7 @@ async def ping() -> dict[str, str]:
 async def invocations(
     req: InvocationRequest,
 ) -> SentimentResult | BatchAnalyzeResponse:
-    if req.text is not None:
+    if isinstance(req.text, str):
         return await _run_single_analysis(req.as_single_request())
     return await _run_batch_analysis(req.as_batch_request())
 
