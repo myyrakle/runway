@@ -8,8 +8,8 @@ dependencies = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",
     "pydantic>=2.6.0",
-    # ML stack. transformers<5.0.0: DeBERTa-v3 tokenizer compatibility.
-    "torch>=2.6.0,<3.0.0",
+    # ML stack. Linux resolves torch from the PyTorch CUDA 12.8 wheel index.
+    "torch==2.8.0",
     "transformers>=4.44.0,<5.0.0",
     "sentencepiece>=0.2.0",
     "protobuf>=5.0.0",
@@ -22,3 +22,13 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["app"]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu128", marker = "sys_platform == 'linux'" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true

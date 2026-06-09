@@ -20,6 +20,18 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8002
 ```
 
 GPU 자동 감지(`cuda`/`cpu`).
+Linux에서는 `torch==2.8.0+cu128` wheel을 사용하도록 고정되어 있으므로 NVIDIA Driver 570 / CUDA 12.8 호환 환경을 기준으로 한다.
+
+CUDA 로딩 확인:
+
+```bash
+uv run python - <<'PY'
+import torch
+print(torch.__version__)
+print(torch.version.cuda)
+print(torch.cuda.is_available())
+PY
+```
 
 ## 환경변수
 
