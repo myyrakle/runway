@@ -16,15 +16,20 @@ dependencies = [
     "safetensors>=0.4.0",
 ]
 
+# Acceleration extras pinned to the CUDA 12.x line so they match the cu128 torch
+# wheel and stay installable on CPython 3.10:
+#   - onnxruntime-gpu PyPI wheels target CUDA 12 here; 1.24+ dropped cp310 wheels.
+#   - tensorrt-cu12 forces the CUDA 12 build (plain `tensorrt` pulls the CUDA 13
+#     11.x meta-package); the 10.x line keeps cp310 wheels.
 [project.optional-dependencies]
 onnx = [
     "onnx>=1.16.0",
-    "onnxruntime-gpu>=1.18.0",
+    "onnxruntime-gpu>=1.18.0,<1.24",
 ]
 tensorrt = [
     "onnx>=1.16.0",
-    "onnxruntime-gpu>=1.18.0",
-    "tensorrt>=10.0.0",
+    "onnxruntime-gpu>=1.18.0,<1.24",
+    "tensorrt-cu12>=10.0.0,<11.0.0",
 ]
 
 [build-system]
