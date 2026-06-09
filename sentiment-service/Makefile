@@ -8,6 +8,9 @@ MAX_LENGTH ?= 512
 PRECISION ?= fp16
 BATCH_SIZE ?= 32
 MAX_BATCH_TOKENS ?= 16384
+# Pad sequence length to a multiple so the native-TRT CUDA-graph path sees only a
+# few distinct shapes (one captured graph each). 0 = dynamic per-chunk padding.
+PAD_MULTIPLE ?= 64
 ONNX_MODEL ?= artifacts/model.onnx
 ONNX_MODEL_FP16 ?= artifacts/model.fp16.onnx
 TRT_ENGINE ?= artifacts/model.plan
@@ -22,8 +25,8 @@ SAMPLE_TEXTS ?= sample/texts.json
 # (or `--extra tensorrt`) first.
 WITH_CUDA = LD_LIBRARY_PATH="$$(ls -d $(VENV)/lib/python*/site-packages/nvidia/*/lib $(VENV)/lib/python*/site-packages/tensorrt_libs 2>/dev/null | tr '\n' ':')$$LD_LIBRARY_PATH"
 
-.PHONY: serve-fp16 serve-onnx-cuda serve-ort-trt serve-tensorrt
-.PHONY: onnx-export onnx-export-fp16 onnx-cuda-sample ort-trt-sample trt-build trt-sample
+.PHONY: serve-fp16 serve-onnx-cuda serve-ort-trt serve-tensorrt serve-tensorrt-cudagraph
+.PHONY: onnx-export onnx-export-fp16 onnx-cuda-sample ort-trt-sample trt-build trt-sample trt-sample-cudagraph
 .PHONY: docker-build-onnx-cuda docker-build-ort-trt docker-build-tensorrt
 
 # Serve the FastAPI app (uvicorn). Each target sets the backend + artifact paths
@@ -57,6 +60,16 @@ trt-build:
 
 trt-sample:
 	$(WITH_CUDA) $(PY) scripts/run_accelerated.py --backend tensorrt --precision $(PRECISION) --texts $(SAMPLE_TEXTS) --engine $(TRT_ENGINE) --batch-size $(BATCH_SIZE) --max-batch-tokens $(MAX_BATCH_TOKENS)
+
+# Native TensorRT with per-shape CUDA-graph capture (near-constant latency, lower
+# jitter). PAD_TO_MULTIPLE_OF buckets sequence lengths so only a few shapes — and
+# thus a few captured graphs — appear. Compare its timing against `make trt-sample`.
+trt-sample-cudagraph:
+	$(WITH_CUDA) PAD_TO_MULTIPLE_OF=$(PAD_MULTIPLE) $(PY) scripts/run_accelerated.py --backend tensorrt --precision $(PRECISION) --texts $(SAMPLE_TEXTS) --engine $(TRT_ENGINE) --batch-size $(BATCH_SIZE) --max-batch-tokens $(MAX_BATCH_TOKENS) --cuda-graph
+
+# Serve the FastAPI app on the native-TRT CUDA-graph path.
+serve-tensorrt-cudagraph:
+	$(WITH_CUDA) INFERENCE_BACKEND=tensorrt TRT_ENGINE_PATH=$(TRT_ENGINE) TRT_CUDA_GRAPH=1 PAD_TO_MULTIPLE_OF=$(PAD_MULTIPLE) DEFAULT_PRECISION=$(PRECISION) ALLOWED_PRECISIONS=$(PRECISION) INFERENCE_BATCH_SIZE=$(BATCH_SIZE) MAX_BATCH_TOKENS=$(MAX_BATCH_TOKENS) uv run uvicorn app.main:app --host $(HOST) --port $(PORT)
 
 docker-build-onnx-cuda:
 	docker build -f docker/Dockerfile.sagemaker-cu128-onnx-cuda -t sentiment-service:cu128-onnx-cuda .

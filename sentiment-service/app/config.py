@@ -21,6 +21,12 @@ ONNX_MODEL_PATH = os.environ.get("ONNX_MODEL_PATH", "artifacts/model.onnx")
 TRT_ENGINE_PATH = os.environ.get("TRT_ENGINE_PATH", "artifacts/model.plan")
 ORT_TRT_CACHE_PATH = os.environ.get("ORT_TRT_CACHE_PATH", "artifacts/ort_trt_cache")
 
+# Capture each distinct input shape of the native TensorRT engine into a replayable
+# CUDA graph (tensorrt backend only). This removes per-call kernel-launch overhead
+# and makes per-shape latency near-constant (lower jitter), at the cost of capturing
+# one graph per shape. Pair with PAD_TO_MULTIPLE_OF to bound how many shapes appear.
+TRT_CUDA_GRAPH = os.environ.get("TRT_CUDA_GRAPH", "0").lower() not in {"0", "false", "no", ""}
+
 # Negative sentiment decision threshold (label==negative AND confidence >= this).
 NEGATIVE_THRESHOLD = float(os.environ.get("NEGATIVE_THRESHOLD", "0.6"))
 

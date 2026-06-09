@@ -27,6 +27,12 @@ def parse_args() -> argparse.Namespace:
         default=2,
         help="Warmup passes excluded from timing (covers ORT/cuDNN algo search).",
     )
+    parser.add_argument(
+        "--cuda-graph",
+        action="store_true",
+        help="tensorrt backend only: capture a CUDA graph per input shape for "
+        "near-constant per-shape latency (lower jitter).",
+    )
     parser.add_argument("--output", default="")
     return parser.parse_args()
 
@@ -40,6 +46,8 @@ def main() -> None:
     os.environ["TRT_ENGINE_PATH"] = args.engine
     os.environ["INFERENCE_BATCH_SIZE"] = str(args.batch_size)
     os.environ["MAX_BATCH_TOKENS"] = str(args.max_batch_tokens)
+    if args.cuda_graph:
+        os.environ["TRT_CUDA_GRAPH"] = "1"
 
     from app.model import DeBERTaABSA
 

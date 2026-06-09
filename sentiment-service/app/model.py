@@ -22,6 +22,7 @@ from app.config import (
     PAD_TO_MULTIPLE_OF,
     SORT_BATCH_BY_LENGTH,
     TRT_ENGINE_PATH,
+    TRT_CUDA_GRAPH,
     ORT_TRT_CACHE_PATH,
 )
 
@@ -109,7 +110,7 @@ class DeBERTaABSA:
                 ],
             )
         if self.backend == "tensorrt":
-            return TensorRTRunner(TRT_ENGINE_PATH)
+            return TensorRTRunner(TRT_ENGINE_PATH, cuda_graph=TRT_CUDA_GRAPH)
         raise ValueError(f"Unsupported backend {self.backend!r}")
 
     def _resolve_pad_to_multiple_of(self) -> int | None:
@@ -282,8 +283,19 @@ class OnnxRuntimeRunner:
         return torch.from_numpy(logits).float()
 
 
+class _CapturedGraph:
+    """One CUDA graph captured for a fixed set of input shapes."""
+
+    __slots__ = ("graph", "static_inputs", "static_output")
+
+    def __init__(self, graph, static_inputs, static_output) -> None:
+        self.graph = graph
+        self.static_inputs = static_inputs
+        self.static_output = static_output
+
+
 class TensorRTRunner:
-    def __init__(self, engine_path: str) -> None:
+    def __init__(self, engine_path: str, cuda_graph: bool = False) -> None:
         try:
             import tensorrt as trt
         except ImportError as exc:
@@ -322,16 +334,41 @@ class TensorRTRunner:
         self._addr_cache: dict[str, int] = {}
         self._output_cache: dict[tuple[int, ...], "torch.Tensor"] = {}
 
+        self.cuda_graph = cuda_graph
+        # One captured graph per distinct input-shape signature. A shape that fails
+        # to capture is marked None so we fall back to eager for it without retrying.
+        self._graphs: dict[tuple, "_CapturedGraph | None"] = {}
+        if cuda_graph:
+            print("[Model] TensorRT CUDA graph capture enabled (per input shape)")
+
     def __call__(self, **inputs):
+        contiguous = {name: inputs[name].contiguous() for name in self.input_names}
+        if self.cuda_graph:
+            key = tuple((name, tuple(contiguous[name].shape)) for name in self.input_names)
+            entry = self._graphs.get(key, "missing")
+            if entry == "missing":
+                entry = self._capture(contiguous)
+                self._graphs[key] = entry
+            if entry is not None:
+                for name in self.input_names:
+                    entry.static_inputs[name].copy_(contiguous[name])
+                entry.graph.replay()
+                return entry.static_output
+        return self._run_eager(contiguous)
+
+    def _bind_shapes(self, contiguous):
         context = self.context
         for name in self.input_names:
-            tensor = inputs[name].contiguous()
-            inputs[name] = tensor  # keep the contiguous copy alive past binding
-            shape = tuple(tensor.shape)
+            shape = tuple(contiguous[name].shape)
             if self._shape_cache.get(name) != shape:
                 context.set_input_shape(name, shape)
                 self._shape_cache[name] = shape
-            addr = tensor.data_ptr()
+
+    def _run_eager(self, contiguous):
+        context = self.context
+        self._bind_shapes(contiguous)
+        for name in self.input_names:
+            addr = contiguous[name].data_ptr()
             if self._addr_cache.get(name) != addr:
                 context.set_tensor_address(name, addr)
                 self._addr_cache[name] = addr
@@ -354,3 +391,47 @@ class TensorRTRunner:
         if not ok:
             raise RuntimeError("TensorRT execute_async_v3 failed")
         return logits
+
+    def _capture(self, contiguous):
+        """Capture a CUDA graph for this shape, binding fixed static IO buffers.
+
+        Returns None (and logs) if capture fails, so the caller drops to the eager
+        path for this shape rather than crashing the request.
+        """
+        context = self.context
+        try:
+            # Static buffers the graph reads from / writes to on every replay.
+            static_inputs = {name: contiguous[name].clone() for name in self.input_names}
+            self._bind_shapes(static_inputs)
+            for name in self.input_names:
+                context.set_tensor_address(name, static_inputs[name].data_ptr())
+            output_shape = tuple(context.get_tensor_shape(self.output_name))
+            static_output = torch.empty(output_shape, dtype=torch.float32, device="cuda")
+            context.set_tensor_address(self.output_name, static_output.data_ptr())
+            # The eager path's address cache no longer reflects the context bindings.
+            self._addr_cache.clear()
+
+            # Warm up on a side stream so any lazy TRT setup / autotuning happens
+            # before capture (capturing an allocating kernel corrupts the graph).
+            side = torch.cuda.Stream()
+            side.wait_stream(torch.cuda.current_stream())
+            with torch.cuda.stream(side):
+                for _ in range(3):
+                    if not context.execute_async_v3(side.cuda_stream):
+                        raise RuntimeError("TensorRT warmup execute_async_v3 failed")
+            torch.cuda.current_stream().wait_stream(side)
+            torch.cuda.synchronize()
+
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                context.execute_async_v3(torch.cuda.current_stream().cuda_stream)
+            return _CapturedGraph(graph, static_inputs, static_output)
+        except Exception as exc:  # capture is best-effort; never break inference
+            print(
+                f"[Model] CUDA graph capture failed for shape "
+                f"{[tuple(contiguous[n].shape) for n in self.input_names]}: {exc}. "
+                "Falling back to eager TensorRT for this shape."
+            )
+            self._shape_cache.clear()
+            self._addr_cache.clear()
+            return None
