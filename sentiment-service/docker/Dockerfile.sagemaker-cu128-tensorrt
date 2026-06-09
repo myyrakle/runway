@@ -15,6 +15,16 @@ ENV PYTHONUNBUFFERED=1 \
     INFERENCE_BATCH_SIZE=32 \
     MAX_BATCH_TOKENS=16384
 
+# Optional: native-TRT CUDA-graph path. Build with `--build-arg CUDA_GRAPH=1` to
+# bake a graph-enabled image (near-constant per-shape latency, lower jitter), or
+# just pass `-e TRT_CUDA_GRAPH=1 -e PAD_TO_MULTIPLE_OF=64` at `docker run` since
+# both are plain runtime env vars. PAD_TO_MULTIPLE_OF buckets sequence lengths so
+# only a few shapes (= a few captured graphs) appear.
+ARG CUDA_GRAPH=0
+ARG PAD_MULTIPLE=64
+ENV TRT_CUDA_GRAPH=${CUDA_GRAPH} \
+    PAD_TO_MULTIPLE_OF=${PAD_MULTIPLE}
+
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 

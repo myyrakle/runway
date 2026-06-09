@@ -27,7 +27,7 @@ WITH_CUDA = LD_LIBRARY_PATH="$$(ls -d $(VENV)/lib/python*/site-packages/nvidia/*
 
 .PHONY: serve-fp16 serve-onnx-cuda serve-ort-trt serve-tensorrt serve-tensorrt-cudagraph
 .PHONY: onnx-export onnx-export-fp16 onnx-cuda-sample ort-trt-sample trt-build trt-sample trt-sample-cudagraph
-.PHONY: docker-build-onnx-cuda docker-build-ort-trt docker-build-tensorrt
+.PHONY: docker-build-onnx-cuda docker-build-ort-trt docker-build-tensorrt docker-build-tensorrt-cudagraph
 
 # Serve the FastAPI app (uvicorn). Each target sets the backend + artifact paths
 # the app reads at startup, plus the CUDA loader path. Hit http://HOST:PORT/docs.
@@ -79,3 +79,6 @@ docker-build-ort-trt:
 
 docker-build-tensorrt:
 	docker build -f docker/Dockerfile.sagemaker-cu128-tensorrt -t sentiment-service:cu128-tensorrt .
+
+docker-build-tensorrt-cudagraph:
+	docker build -f docker/Dockerfile.sagemaker-cu128-tensorrt --build-arg CUDA_GRAPH=1 --build-arg PAD_MULTIPLE=$(PAD_MULTIPLE) -t sentiment-service:cu128-tensorrt-cudagraph .
