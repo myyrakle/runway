@@ -25,6 +25,18 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8001
 GPU가 있으면 자동으로 `cuda`, 없으면 `cpu`로 로드된다.
 Linux에서는 `torch==2.8.0+cu128` wheel을 사용하도록 고정되어 있으므로 NVIDIA Driver 570 / CUDA 12.8 호환 환경을 기준으로 한다.
 
+로컬에서 `uv`로 fp16 전용 모드를 실행하려면 CUDA GPU가 있는 환경에서 precision
+환경변수를 고정한다.
+
+```bash
+DEFAULT_PRECISION=fp16 \
+ALLOWED_PRECISIONS=fp16 \
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8001
+```
+
+fp16은 CUDA 전용이므로 `torch.cuda.is_available()`가 `False`이면 startup에서
+실패한다.
+
 SageMaker Dockerfile과 빌드/실행 명령은 [docker/README.md](docker/README.md)에
 정리되어 있다. CUDA 이미지는 precision별로 분리되어 있고, CPU 이미지는 PyTorch
 CPU wheel을 사용한다.
