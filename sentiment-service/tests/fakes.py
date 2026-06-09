@@ -89,3 +89,34 @@ def install_fake_ml_modules() -> types.ModuleType:
     sys.modules["transformers"] = fake_transformers
     return fake_torch
 
+
+def install_fake_fastapi_modules() -> None:
+    fake_fastapi = types.ModuleType("fastapi")
+
+    class FakeFastAPI:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        def get(self, *args, **kwargs):
+            return lambda func: func
+
+        def post(self, *args, **kwargs):
+            return lambda func: func
+
+    class FakeHTTPException(Exception):
+        def __init__(self, status_code: int, detail: str) -> None:
+            super().__init__(detail)
+            self.status_code = status_code
+            self.detail = detail
+
+    fake_fastapi.FastAPI = FakeFastAPI
+    fake_fastapi.HTTPException = FakeHTTPException
+    sys.modules["fastapi"] = fake_fastapi
+
+    fake_concurrency = types.ModuleType("fastapi.concurrency")
+
+    async def run_in_threadpool(func, *args, **kwargs):
+        return func(*args, **kwargs)
+
+    fake_concurrency.run_in_threadpool = run_in_threadpool
+    sys.modules["fastapi.concurrency"] = fake_concurrency

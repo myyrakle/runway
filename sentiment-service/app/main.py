@@ -29,7 +29,7 @@ from app.schemas import (
     SentimentResult,
 )
 
-# Lazily-loaded model variants, keyed by precision. fp32 loaded on startup.
+# Lazily-loaded model variants, keyed by precision.
 _models: dict[str, DeBERTaABSA] = {}
 _load_lock = threading.Lock()
 
@@ -87,22 +87,30 @@ async def invocations(
     req: AnalyzeRequest | BatchAnalyzeRequest,
 ) -> SentimentResult | BatchAnalyzeResponse:
     if isinstance(req, BatchAnalyzeRequest):
-        return await analyze_batch(req)
-    return await analyze(req)
+        return await _run_batch_analysis(req)
+    return await _run_single_analysis(req)
 
 
-@app.post("/analyze", response_model=SentimentResult)
-async def analyze(req: AnalyzeRequest) -> SentimentResult:
+async def _run_single_analysis(req: AnalyzeRequest) -> SentimentResult:
     model = await run_in_threadpool(_get_variant, req.precision)
     result = await run_in_threadpool(model.analyze, req.text, req.aspect)
     return SentimentResult(**result)
 
 
-@app.post("/analyze/batch", response_model=BatchAnalyzeResponse)
-async def analyze_batch(req: BatchAnalyzeRequest) -> BatchAnalyzeResponse:
+async def _run_batch_analysis(req: BatchAnalyzeRequest) -> BatchAnalyzeResponse:
     model = await run_in_threadpool(_get_variant, req.precision)
     results = await run_in_threadpool(model.analyze_batch, req.texts, req.aspect)
     return BatchAnalyzeResponse(results=[SentimentResult(**r) for r in results])
+
+
+@app.post("/analyze", response_model=SentimentResult)
+async def analyze(req: AnalyzeRequest) -> SentimentResult:
+    return await _run_single_analysis(req)
+
+
+@app.post("/analyze/batch", response_model=BatchAnalyzeResponse)
+async def analyze_batch(req: BatchAnalyzeRequest) -> BatchAnalyzeResponse:
+    return await _run_batch_analysis(req)
 
 
 @app.post("/benchmark", response_model=BenchmarkResponse)

@@ -63,6 +63,7 @@ PY
 | 메서드 | 경로 | 설명 |
 |--------|------|------|
 | GET | `/health` | 상태 + 모델/디바이스 |
+| POST | `/invocations` | SageMaker 추론 진입점, 단일/배치 모두 지원 |
 | POST | `/analyze` | 단일 텍스트 |
 | POST | `/analyze/batch` | 텍스트 배치 |
 | POST | `/benchmark` | 추론 속도 측정 (avg/min/max ms) |
@@ -71,12 +72,22 @@ PY
 `INFERENCE_BATCH_SIZE` 단위로 나눠 실행한다. 길이가 큰 배치 요청 하나가
 GPU/CPU 메모리를 한 번에 밀어붙이지 않도록 하기 위한 안전장치다. 단, 여러
 개의 `/analyze` 단건 요청을 서버 내부에서 자동으로 모아 micro-batching하는
-큐는 아직 없다. 처리량이 중요하면 호출 측에서 `/analyze/batch`를 사용해야 한다.
+큐는 아직 없다. 처리량이 중요하면 호출 측에서 `/invocations` 또는
+`/analyze/batch`에 배치 payload를 보내야 한다. 두 엔드포인트는 같은 배치 추론
+경로를 사용한다.
 
 ```bash
 curl -X POST localhost:8001/analyze \
   -H 'Content-Type: application/json' \
   -d '{"text": "The battery life is terrible", "aspect": "battery"}'
+```
+
+SageMaker `/invocations` 배치 요청:
+
+```bash
+curl -X POST localhost:8001/invocations \
+  -H 'Content-Type: application/json' \
+  -d '{"texts": ["The battery life is terrible", "The screen is great"], "aspect": "overall"}'
 ```
 
 ```json

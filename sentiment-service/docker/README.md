@@ -60,3 +60,9 @@ Then request `{"precision": "int8"}` explicitly.
 The images expose port `8080` and provide `/ping` and `/invocations`, matching
 SageMaker inference container expectations.
 
+Use `/invocations` for both single and batch payloads. Batch payloads use the
+same bounded `INFERENCE_BATCH_SIZE` model-forward path as `/analyze/batch`.
+
+```json
+{"texts": ["The battery life is terrible", "The screen is great"], "aspect": "overall"}
+```
