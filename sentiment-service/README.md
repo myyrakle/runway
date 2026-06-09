@@ -27,6 +27,7 @@ GPU가 있으면 자동으로 `cuda`, 없으면 `cpu`로 로드된다.
 | GET | `/health` | 상태 + 모델/디바이스 |
 | POST | `/analyze` | 단일 텍스트 |
 | POST | `/analyze/batch` | 텍스트 배치 |
+| POST | `/benchmark` | 추론 속도 측정 (avg/min/max ms) |
 
 ```bash
 curl -X POST localhost:8001/analyze \
@@ -40,6 +41,29 @@ curl -X POST localhost:8001/analyze \
   "confidence": 0.98,
   "is_negative": true,
   "probs": {"negative": 0.98, "neutral": 0.01, "positive": 0.01}
+}
+```
+
+### 벤치마크
+
+워밍업(`warmup`) 후 `iterations`회 반복 측정. 디폴트 바디로 그냥 호출해도 된다.
+
+```bash
+curl -X POST localhost:8001/benchmark \
+  -H 'Content-Type: application/json' \
+  -d '{"iterations": 50, "warmup": 5}'
+```
+
+```json
+{
+  "model": "yangheng/deberta-v3-base-absa-v1.1",
+  "device": "cuda",
+  "iterations": 50,
+  "warmup": 5,
+  "avg_ms": 8.3,
+  "min_ms": 7.1,
+  "max_ms": 12.4,
+  "total_ms": 415.0
 }
 ```
 

@@ -35,3 +35,24 @@ class HealthResponse(BaseModel):
     status: str
     model: str
     device: str
+
+
+class BenchmarkRequest(BaseModel):
+    text: str = Field(
+        "The battery life is terrible and the screen is great.",
+        description="Sample text to repeatedly analyze",
+    )
+    aspect: str = Field("overall", description="ABSA aspect / target")
+    iterations: int = Field(20, ge=1, le=1000, description="Timed iterations")
+    warmup: int = Field(2, ge=0, le=100, description="Untimed warmup iterations")
+
+
+class BenchmarkResponse(BaseModel):
+    model: str
+    device: str
+    iterations: int
+    warmup: int
+    avg_ms: float
+    min_ms: float
+    max_ms: float
+    total_ms: float

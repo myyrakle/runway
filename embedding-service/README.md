@@ -33,6 +33,7 @@ E5는 모든 입력에 task prefix가 필요하다. 요청마다 `prefix`로 지
 |--------|------|------|
 | GET | `/health` | 상태 + 모델/디바이스/차원 |
 | POST | `/embed` | 텍스트 배치 → 정규화 벡터 |
+| POST | `/benchmark` | 인코딩 속도 측정 (avg/min/max ms) |
 
 ```bash
 curl -X POST localhost:8002/embed \
@@ -42,6 +43,30 @@ curl -X POST localhost:8002/embed \
 
 ```json
 {"embeddings": [[0.01, -0.03, ...]], "dim": 1024, "count": 1}
+```
+
+### 벤치마크
+
+워밍업(`warmup`) 후 `iterations`회 반복 인코딩 측정. `texts`로 배치 크기를 바꿔 처리량을 본다.
+
+```bash
+curl -X POST localhost:8002/benchmark \
+  -H 'Content-Type: application/json' \
+  -d '{"texts": ["문장1", "문장2"], "iterations": 50, "warmup": 5}'
+```
+
+```json
+{
+  "model": "intfloat/multilingual-e5-large",
+  "device": "cuda",
+  "iterations": 50,
+  "warmup": 5,
+  "texts_per_iteration": 2,
+  "avg_ms": 21.7,
+  "min_ms": 19.2,
+  "max_ms": 38.5,
+  "total_ms": 1085.0
+}
 ```
 
 Swagger: `http://localhost:8002/docs`

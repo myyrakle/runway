@@ -7,6 +7,7 @@ Endpoints:
 """
 from __future__ import annotations
 
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -18,6 +19,8 @@ from app.schemas import (
     AnalyzeRequest,
     BatchAnalyzeRequest,
     BatchAnalyzeResponse,
+    BenchmarkRequest,
+    BenchmarkResponse,
     HealthResponse,
     SentimentResult,
 )
@@ -67,3 +70,31 @@ async def analyze(req: AnalyzeRequest) -> SentimentResult:
 async def analyze_batch(req: BatchAnalyzeRequest) -> BatchAnalyzeResponse:
     results = await run_in_threadpool(get_model().analyze_batch, req.texts, req.aspect)
     return BatchAnalyzeResponse(results=[SentimentResult(**r) for r in results])
+
+
+@app.post("/benchmark", response_model=BenchmarkResponse)
+async def benchmark(req: BenchmarkRequest) -> BenchmarkResponse:
+    """Time repeated single-text inference. Warmup runs are excluded from stats."""
+    model = get_model()
+
+    def run() -> list[float]:
+        for _ in range(req.warmup):
+            model.analyze(req.text, req.aspect)
+        durations = []
+        for _ in range(req.iterations):
+            start = time.perf_counter()
+            model.analyze(req.text, req.aspect)
+            durations.append((time.perf_counter() - start) * 1000.0)
+        return durations
+
+    durations = await run_in_threadpool(run)
+    return BenchmarkResponse(
+        model=MODEL_NAME,
+        device=DEVICE,
+        iterations=req.iterations,
+        warmup=req.warmup,
+        avg_ms=sum(durations) / len(durations),
+        min_ms=min(durations),
+        max_ms=max(durations),
+        total_ms=sum(durations),
+    )

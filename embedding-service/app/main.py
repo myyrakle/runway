@@ -6,6 +6,7 @@ Endpoints:
 """
 from __future__ import annotations
 
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -13,7 +14,13 @@ from fastapi.concurrency import run_in_threadpool
 
 from app.config import EMBEDDING_DIM, MODEL_NAME
 from app.model import E5Embedder
-from app.schemas import EmbedRequest, EmbedResponse, HealthResponse
+from app.schemas import (
+    BenchmarkRequest,
+    BenchmarkResponse,
+    EmbedRequest,
+    EmbedResponse,
+    HealthResponse,
+)
 
 _model: E5Embedder | None = None
 
@@ -58,3 +65,32 @@ async def embed(req: EmbedRequest) -> EmbedResponse:
     vectors = arr.tolist()
     dim = arr.shape[1] if arr.ndim == 2 and arr.shape[0] > 0 else EMBEDDING_DIM
     return EmbedResponse(embeddings=vectors, dim=dim, count=len(vectors))
+
+
+@app.post("/benchmark", response_model=BenchmarkResponse)
+async def benchmark(req: BenchmarkRequest) -> BenchmarkResponse:
+    """Time repeated batch encoding. Warmup runs are excluded from stats."""
+    model = get_model()
+
+    def run() -> list[float]:
+        for _ in range(req.warmup):
+            model.generate(req.texts, req.prefix, req.batch_size)
+        durations = []
+        for _ in range(req.iterations):
+            start = time.perf_counter()
+            model.generate(req.texts, req.prefix, req.batch_size)
+            durations.append((time.perf_counter() - start) * 1000.0)
+        return durations
+
+    durations = await run_in_threadpool(run)
+    return BenchmarkResponse(
+        model=MODEL_NAME,
+        device=_model.device if _model is not None else "unknown",
+        iterations=req.iterations,
+        warmup=req.warmup,
+        texts_per_iteration=len(req.texts),
+        avg_ms=sum(durations) / len(durations),
+        min_ms=min(durations),
+        max_ms=max(durations),
+        total_ms=sum(durations),
+    )

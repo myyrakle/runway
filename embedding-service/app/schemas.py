@@ -27,3 +27,26 @@ class HealthResponse(BaseModel):
     model: str
     device: str
     dim: int
+
+
+class BenchmarkRequest(BaseModel):
+    texts: list[str] = Field(
+        default_factory=lambda: ["The quick brown fox jumps over the lazy dog."],
+        description="Sample texts encoded once per iteration",
+    )
+    prefix: str = Field(DEFAULT_PREFIX, description="E5 task prefix")
+    batch_size: int = Field(DEFAULT_BATCH_SIZE, ge=1, description="Encode batch size")
+    iterations: int = Field(20, ge=1, le=1000, description="Timed iterations")
+    warmup: int = Field(2, ge=0, le=100, description="Untimed warmup iterations")
+
+
+class BenchmarkResponse(BaseModel):
+    model: str
+    device: str
+    iterations: int
+    warmup: int
+    texts_per_iteration: int
+    avg_ms: float
+    min_ms: float
+    max_ms: float
+    total_ms: float
