@@ -303,24 +303,54 @@ class TensorRTRunner:
         self.tensor_names = [
             self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)
         ]
+        # Partition IO once instead of re-scanning every call.
+        self.input_names = [
+            name for name in self.tensor_names
+            if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT
+        ]
+        if "logits" in self.tensor_names:
+            self.output_name = "logits"
+        else:
+            self.output_name = next(
+                name for name in self.tensor_names
+                if self.engine.get_tensor_mode(name) == trt.TensorIOMode.OUTPUT
+            )
+        # Per-call host work (re-setting shapes/addresses, allocating the output)
+        # is what makes native-TRT latency jitter relative to ORT-TRT's C++ glue.
+        # Cache so each is touched only when it actually changes.
+        self._shape_cache: dict[str, tuple[int, ...]] = {}
+        self._addr_cache: dict[str, int] = {}
+        self._output_cache: dict[tuple[int, ...], "torch.Tensor"] = {}
 
     def __call__(self, **inputs):
-        cuda_inputs = {name: tensor.contiguous() for name, tensor in inputs.items()}
-        for name, tensor in cuda_inputs.items():
-            if name in self.tensor_names:
-                self.context.set_input_shape(name, tuple(tensor.shape))
+        context = self.context
+        for name in self.input_names:
+            tensor = inputs[name].contiguous()
+            inputs[name] = tensor  # keep the contiguous copy alive past binding
+            shape = tuple(tensor.shape)
+            if self._shape_cache.get(name) != shape:
+                context.set_input_shape(name, shape)
+                self._shape_cache[name] = shape
+            addr = tensor.data_ptr()
+            if self._addr_cache.get(name) != addr:
+                context.set_tensor_address(name, addr)
+                self._addr_cache[name] = addr
 
-        output_name = "logits" if "logits" in self.tensor_names else self.tensor_names[-1]
-        output_shape = tuple(self.context.get_tensor_shape(output_name))
-        logits = torch.empty(output_shape, dtype=torch.float32, device="cuda")
-
-        tensors = {**cuda_inputs, output_name: logits}
-        for name, tensor in tensors.items():
-            if name in self.tensor_names:
-                self.context.set_tensor_address(name, tensor.data_ptr())
+        output_shape = tuple(context.get_tensor_shape(self.output_name))
+        # Reuse the device buffer for a given output shape (batch size) instead of
+        # allocating per call. Safe because the caller syncs (softmax(...).cpu())
+        # before the next forward pass reuses it.
+        logits = self._output_cache.get(output_shape)
+        if logits is None:
+            logits = torch.empty(output_shape, dtype=torch.float32, device="cuda")
+            self._output_cache[output_shape] = logits
+        out_addr = logits.data_ptr()
+        if self._addr_cache.get(self.output_name) != out_addr:
+            context.set_tensor_address(self.output_name, out_addr)
+            self._addr_cache[self.output_name] = out_addr
 
         stream = torch.cuda.current_stream().cuda_stream
-        ok = self.context.execute_async_v3(stream)
+        ok = context.execute_async_v3(stream)
         if not ok:
             raise RuntimeError("TensorRT execute_async_v3 failed")
         return logits
