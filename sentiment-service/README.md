@@ -94,6 +94,41 @@ GPU fp16 배치에서는 기본적으로 tokenizer padding을 8의 배수로 맞
 친화적인 shape를 만들고, batch item을 길이순으로 chunking해서 dynamic padding
 낭비를 줄인다. 응답 순서는 입력 순서대로 복원된다.
 
+### 배치 크기 가이드
+
+최적 `INFERENCE_BATCH_SIZE`는 GPU, precision, 입력 길이 분포에 따라 달라진다.
+이 저장소의 [sample/texts.json](sample/texts.json)처럼 긴 텍스트가 섞인 입력과
+NVIDIA T4 + fp16 조합에서는 아래 값을 기준으로 시작한다.
+
+| 목적 | 권장값 |
+|------|--------|
+| 안정 우선 | `INFERENCE_BATCH_SIZE=16` |
+| T4 fp16 기본 추천 | `INFERENCE_BATCH_SIZE=32` |
+| 처리량 실험 | `INFERENCE_BATCH_SIZE=64` |
+
+T4 fp16 로컬 실행 예:
+
+```bash
+DEFAULT_PRECISION=fp16 \
+ALLOWED_PRECISIONS=fp16 \
+INFERENCE_BATCH_SIZE=32 \
+SORT_BATCH_BY_LENGTH=1 \
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8001
+```
+
+`sample/texts.json`으로 실제 배치 요청:
+
+```bash
+curl -X POST localhost:8001/invocations \
+  -H 'Content-Type: application/json' \
+  -d "{\"texts\": $(cat sample/texts.json), \"aspect\": \"overall\"}"
+```
+
+튜닝은 `INFERENCE_BATCH_SIZE=16`, `32`, `64`를 비교한다. `per_item_ms`가 더 이상
+줄지 않거나 OOM/latency 급증이 생기면 직전 값을 사용한다. `/benchmark`는 같은
+텍스트를 반복하므로 `sample/texts.json`의 실제 길이 분포를 완전히 대변하지
+않는다.
+
 ```bash
 curl -X POST localhost:8001/analyze \
   -H 'Content-Type: application/json' \
