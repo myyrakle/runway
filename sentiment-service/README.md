@@ -67,6 +67,8 @@ PY
 | `MAX_LENGTH` | `512` | 토큰 truncation 길이 |
 | `MAX_BATCH_ITEMS` | `1024` | `/analyze/batch`, `/invocations` 배치 요청의 최대 텍스트 수 |
 | `INFERENCE_BATCH_SIZE` | `64` | 한 번의 model forward에 넣는 내부 추론 청크 크기 |
+| `SORT_BATCH_BY_LENGTH` | `1` | 배치를 길이순으로 묶어 chunk 내 padding 낭비 감소 |
+| `PAD_TO_MULTIPLE_OF` | `0` | tokenizer padding 배수. `0`이면 CUDA fp16에서 자동으로 `8` 사용 |
 | `DEFAULT_PRECISION` | `fp32` | startup에 로드할 precision |
 | `ALLOWED_PRECISIONS` | `DEFAULT_PRECISION` | 이 컨테이너에서 허용할 precision 목록 |
 
@@ -88,6 +90,10 @@ GPU/CPU 메모리를 한 번에 밀어붙이지 않도록 하기 위한 안전�
 `/analyze/batch`에 배치 payload를 보내야 한다. 두 엔드포인트는 같은 배치 추론
 경로를 사용한다.
 
+GPU fp16 배치에서는 기본적으로 tokenizer padding을 8의 배수로 맞춰 Tensor Core
+친화적인 shape를 만들고, batch item을 길이순으로 chunking해서 dynamic padding
+낭비를 줄인다. 응답 순서는 입력 순서대로 복원된다.
+
 ```bash
 curl -X POST localhost:8001/analyze \
   -H 'Content-Type: application/json' \
@@ -99,7 +105,7 @@ SageMaker `/invocations` 배치 요청:
 ```bash
 curl -X POST localhost:8001/invocations \
   -H 'Content-Type: application/json' \
-  -d '{"text": ["The battery life is terrible", "The screen is great"], "aspect": "overall"}'
+  -d '{"texts": ["The battery life is terrible", "The screen is great"], "aspect": "overall"}'
 ```
 
 SageMaker-style `instances` payload도 같은 배치 경로를 사용한다.

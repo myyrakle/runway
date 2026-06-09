@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from app.config import DEFAULT_PRECISION, MAX_BATCH_ITEMS
 
@@ -29,11 +29,32 @@ class BatchAnalyzeRequest(BaseModel):
 
 
 class InvocationRequest(BaseModel):
-    text: str | list[str] | None = Field(
+    model_config = ConfigDict(
+        json_schema_extra={
+            "examples": [
+                {
+                    "texts": [
+                        "The battery life is terrible",
+                        "The screen is great",
+                    ],
+                    "aspect": "overall",
+                }
+            ]
+        }
+    )
+
+    text: str | None = Field(None, description="Single text to analyze")
+    texts: list[str] | None = Field(
         None,
         min_length=1,
         max_length=MAX_BATCH_ITEMS,
-        description="Text or batch texts to analyze",
+        description="Batch texts to analyze",
+        examples=[
+            [
+                "The battery life is terrible",
+                "The screen is great",
+            ]
+        ],
     )
     instances: list[str] | None = Field(
         None,
@@ -48,14 +69,15 @@ class InvocationRequest(BaseModel):
     def validate_payload(self) -> "InvocationRequest":
         provided = [
             self.text is not None,
+            self.texts is not None,
             self.instances is not None,
         ]
         if sum(provided) != 1:
-            raise ValueError("Provide exactly one of text or instances")
+            raise ValueError("Provide exactly one of text, texts, or instances")
         return self
 
     def as_single_request(self) -> AnalyzeRequest:
-        if not isinstance(self.text, str):
+        if self.text is None:
             raise ValueError("InvocationRequest does not contain a single text")
         return AnalyzeRequest(
             text=self.text,
@@ -64,7 +86,7 @@ class InvocationRequest(BaseModel):
         )
 
     def as_batch_request(self) -> BatchAnalyzeRequest:
-        texts = self.text if isinstance(self.text, list) else self.instances
+        texts = self.texts if self.texts is not None else self.instances
         if texts is None:
             raise ValueError("InvocationRequest does not contain batch texts")
         return BatchAnalyzeRequest(

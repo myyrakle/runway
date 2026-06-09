@@ -22,6 +22,17 @@ MAX_BATCH_ITEMS = int(os.environ.get("MAX_BATCH_ITEMS", "1024"))
 # Maximum number of texts sent through one model forward pass.
 INFERENCE_BATCH_SIZE = int(os.environ.get("INFERENCE_BATCH_SIZE", "64"))
 
+# Sort large batches by approximate sequence length before chunking. This keeps
+# dynamic padding lower inside each model forward pass while preserving response order.
+SORT_BATCH_BY_LENGTH = os.environ.get("SORT_BATCH_BY_LENGTH", "1").lower() not in {
+    "0",
+    "false",
+    "no",
+}
+
+# Optional tokenizer padding alignment. Leave unset/0 to auto-use 8 for CUDA fp16.
+PAD_TO_MULTIPLE_OF = int(os.environ.get("PAD_TO_MULTIPLE_OF", "0"))
+
 # Precision loaded at startup. Docker images should set this explicitly.
 DEFAULT_PRECISION = os.environ.get("DEFAULT_PRECISION", "fp32")
 if DEFAULT_PRECISION not in VALID_PRECISIONS:

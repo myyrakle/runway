@@ -14,6 +14,8 @@ from app.config import (
     MAX_LENGTH,
     MODEL_NAME,
     NEGATIVE_THRESHOLD,
+    PAD_TO_MULTIPLE_OF,
+    SORT_BATCH_BY_LENGTH,
 )
 
 PRECISIONS = ("fp32", "fp16", "int8")
@@ -52,17 +54,32 @@ class DeBERTaABSA:
             model = model.to(self.device)
 
         self.model = model
+        self.pad_to_multiple_of = self._resolve_pad_to_multiple_of()
         print(f"[Model] Loaded precision={precision} on {self.device}")
 
+    def _resolve_pad_to_multiple_of(self) -> int | None:
+        if PAD_TO_MULTIPLE_OF > 0:
+            return PAD_TO_MULTIPLE_OF
+        if self.precision == "fp16" and self.device == "cuda":
+            return 8
+        return None
+
     def _tokenize(self, texts, aspects):
-        inputs = self.tokenizer(
-            texts,
-            aspects,
-            return_tensors="pt",
-            truncation=True,
-            max_length=MAX_LENGTH,
-            padding=True,
+        kwargs = {
+            "return_tensors": "pt",
+            "truncation": True,
+            "max_length": MAX_LENGTH,
+            "padding": True,
+        }
+        pad_to_multiple_of = getattr(
+            self, "pad_to_multiple_of", self._resolve_pad_to_multiple_of()
         )
+        if pad_to_multiple_of is not None:
+            kwargs["pad_to_multiple_of"] = pad_to_multiple_of
+
+        inputs = self.tokenizer(texts, aspects, **kwargs)
+        if self.device == "cuda":
+            return {k: v.to(self.device, non_blocking=True) for k, v in inputs.items()}
         return {k: v.to(self.device) for k, v in inputs.items()}
 
     def analyze(self, text: str, aspect: str = "overall") -> dict:
@@ -94,11 +111,19 @@ class DeBERTaABSA:
         if not texts:
             return []
 
-        results = []
-        for start in range(0, len(texts), INFERENCE_BATCH_SIZE):
-            chunk = texts[start:start + INFERENCE_BATCH_SIZE]
-            results.extend(self._analyze_batch_chunk(chunk, aspect))
-        return results
+        indexed_texts = list(enumerate(texts))
+        if SORT_BATCH_BY_LENGTH:
+            indexed_texts.sort(key=lambda item: len(item[1]) + len(aspect))
+
+        ordered_results: list[dict | None] = [None] * len(texts)
+        for start in range(0, len(indexed_texts), INFERENCE_BATCH_SIZE):
+            chunk = indexed_texts[start:start + INFERENCE_BATCH_SIZE]
+            chunk_indices = [index for index, _ in chunk]
+            chunk_texts = [text for _, text in chunk]
+            chunk_results = self._analyze_batch_chunk(chunk_texts, aspect)
+            for index, result in zip(chunk_indices, chunk_results):
+                ordered_results[index] = result
+        return [result for result in ordered_results if result is not None]
 
     def _analyze_batch_chunk(self, texts: list[str], aspect: str) -> list[dict]:
         """Run one bounded model forward pass."""

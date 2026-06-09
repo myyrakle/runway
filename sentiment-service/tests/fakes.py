@@ -34,7 +34,8 @@ class FakeTensor:
             return FakeTensor(value)
         return FakeScalar(value)
 
-    def to(self, device):
+    def to(self, device, **kwargs):
+        self.to_kwargs = kwargs
         return self
 
     def detach(self):

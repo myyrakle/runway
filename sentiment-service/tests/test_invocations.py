@@ -51,7 +51,7 @@ class InvocationTests(unittest.TestCase):
         main_module._get_variant = self.original_get_variant
 
     def test_invocations_batch_uses_same_batch_inference_path(self) -> None:
-        req = InvocationRequest(text=["a", "b"], aspect="battery")
+        req = InvocationRequest(texts=["a", "b"], aspect="battery")
 
         result = asyncio.run(main_module.invocations(req))
 
@@ -77,8 +77,19 @@ class InvocationTests(unittest.TestCase):
         self.assertEqual(self.model.batch_calls, [(["a", "b", "c"], "screen")])
         self.assertEqual(self.model.single_calls, [])
 
-    def test_invocation_schema_documents_text_not_texts(self) -> None:
-        properties = InvocationRequest.model_json_schema()["properties"]
+    def test_invocation_schema_documents_texts_for_batch(self) -> None:
+        schema = InvocationRequest.model_json_schema()
+        properties = schema["properties"]
 
         self.assertIn("text", properties)
-        self.assertNotIn("texts", properties)
+        self.assertIn("texts", properties)
+
+    def test_invocation_schema_shows_batch_texts_example(self) -> None:
+        schema = InvocationRequest.model_json_schema()
+        texts_schema = schema["properties"]["texts"]
+
+        self.assertEqual(texts_schema["anyOf"][0]["type"], "array")
+        self.assertEqual(
+            schema["examples"][0]["texts"],
+            ["The battery life is terrible", "The screen is great"],
+        )
