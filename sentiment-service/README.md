@@ -160,42 +160,40 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8001
 PyTorch fp16 baseline을 먼저 측정한 뒤 아래 순서로 비교한다.
 
 ```bash
-make onnx-export            # fp32 ONNX (artifacts/model.onnx)
-make onnx-cuda-sample       # onnx-cuda, fp32 그래프
-make onnx-export-fp16       # fp16 ONNX (artifacts/model.fp16.onnx)
-make onnx-cuda-sample-fp16  # onnx-cuda, fp16 그래프 (Tensor Core)
-make ort-trt-sample         # ONNX Runtime TensorRT EP (fp16)
-make trt-build              # native TensorRT fp16 engine
-make trt-sample             # native TensorRT (fp16)
+make onnx-export-fp16   # fp16 ONNX (artifacts/model.fp16.onnx)
+make onnx-cuda-sample   # onnx-cuda, fp16 그래프 (Tensor Core)
+make onnx-export        # fp32 ONNX — ort-trt / tensorrt 엔진 빌드 입력용
+make ort-trt-sample     # ONNX Runtime TensorRT EP (fp16)
+make trt-build          # native TensorRT fp16 engine
+make trt-sample         # native TensorRT (fp16)
 ```
 
 `*-sample` 타깃은 `--warmup`(기본 2회) 이후를 측정하므로 ORT/cuDNN 첫 실행의
 알고리즘 탐색 비용이 빠진다.
 
-> onnx-cuda 백엔드는 ONNX 그래프 자체의 정밀도를 그대로 실행한다. fp32 ONNX를
-> `--precision fp16`으로 돌려도 실제 연산은 fp32다. fp16 이득을 보려면
-> `onnx-export-fp16`으로 만든 그래프를 써야 한다. 이 export는 `model.half()`를
-> CUDA에서 추적해 네이티브 fp16 그래프를 만들므로 GPU가 필요하다(정수 입력은 그대로
-> 유지). 후처리 float16 변환은 DeBERTa에서 Cast 노드 타입 불일치를 만들어 ONNX
-> Runtime이 로드를 거부해서 쓰지 않는다. 반면 `ort-trt`와 native `tensorrt`는 엔진
-> 빌드 시 fp16을 켜므로 fp32 ONNX에서 출발해도 fp16으로 실행된다. fp16은 정밀도
-> 손실이 생길 수 있으니 `sample/`로 정확도를 확인한다.
+> onnx-cuda 백엔드는 ONNX 그래프 자체의 정밀도를 그대로 실행하므로 fp16 이득을
+> 보려면 `onnx-export-fp16`으로 만든 fp16 그래프를 써야 한다. 이 export는
+> `model.half()`를 CUDA에서 추적해 네이티브 fp16 그래프를 만들므로 GPU가 필요하다
+> (정수 입력은 그대로 유지). 후처리 float16 변환은 DeBERTa에서 Cast 노드 타입
+> 불일치를 만들어 ONNX Runtime이 로드를 거부해서 쓰지 않는다. `onnx-export`로 만든
+> fp32 ONNX는 자체 실행용이 아니라 `ort-trt`/native `tensorrt`가 fp16 엔진을 빌드할
+> 때의 입력이다(둘 다 엔진 빌드 시 fp16을 켠다). fp16은 정밀도 손실이 생길 수
+> 있으니 `sample/`로 정확도를 확인한다.
 
 서비스(FastAPI)로 띄울 때는 backend별 make 타깃을 쓰면 artifact path·precision·
 CUDA 로더 경로가 한 번에 설정된다.
 
 ```bash
-make serve-onnx-cuda        # fp32 ONNX
-make serve-onnx-cuda-fp16   # fp16 ONNX (onnx-export-fp16 먼저)
-make serve-ort-trt          # ort-trt (fp16)
-make serve-tensorrt         # native TensorRT (trt-build 먼저)
+make serve-onnx-cuda    # onnx-cuda fp16 (onnx-export-fp16 먼저)
+make serve-ort-trt      # ort-trt (fp16)
+make serve-tensorrt     # native TensorRT (trt-build 먼저)
 ```
 
 또는 직접 artifact path와 backend를 지정한다.
 
 ```bash
 INFERENCE_BACKEND=onnx-cuda \
-ONNX_MODEL_PATH=artifacts/model.onnx \
+ONNX_MODEL_PATH=artifacts/model.fp16.onnx \
 DEFAULT_PRECISION=fp16 \
 ALLOWED_PRECISIONS=fp16 \
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8001

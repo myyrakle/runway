@@ -20,8 +20,8 @@ SAMPLE_TEXTS ?= sample/texts.json
 # .venv after `uv sync`; run `uv sync` (or `uv sync --extra onnx/tensorrt`) first.
 WITH_CUDA = LD_LIBRARY_PATH="$$(ls -d $(VENV)/lib/python*/site-packages/nvidia/*/lib 2>/dev/null | tr '\n' ':')$$LD_LIBRARY_PATH"
 
-.PHONY: serve-fp16 serve-onnx-cuda serve-onnx-cuda-fp16 serve-ort-trt serve-tensorrt
-.PHONY: onnx-export onnx-export-fp16 onnx-cuda-sample onnx-cuda-sample-fp16 ort-trt-sample trt-build trt-sample
+.PHONY: serve-fp16 serve-onnx-cuda serve-ort-trt serve-tensorrt
+.PHONY: onnx-export onnx-export-fp16 onnx-cuda-sample ort-trt-sample trt-build trt-sample
 .PHONY: docker-build-onnx-cuda docker-build-ort-trt docker-build-tensorrt
 
 # Serve the FastAPI app (uvicorn). Each target sets the backend + artifact paths
@@ -30,9 +30,6 @@ serve-fp16:
 	$(WITH_CUDA) DEFAULT_PRECISION=fp16 ALLOWED_PRECISIONS=fp16 INFERENCE_BATCH_SIZE=$(BATCH_SIZE) MAX_BATCH_TOKENS=$(MAX_BATCH_TOKENS) uv run uvicorn app.main:app --host $(HOST) --port $(PORT)
 
 serve-onnx-cuda:
-	$(WITH_CUDA) INFERENCE_BACKEND=onnx-cuda ONNX_MODEL_PATH=$(ONNX_MODEL) DEFAULT_PRECISION=fp32 ALLOWED_PRECISIONS=fp32 INFERENCE_BATCH_SIZE=$(BATCH_SIZE) MAX_BATCH_TOKENS=$(MAX_BATCH_TOKENS) uv run uvicorn app.main:app --host $(HOST) --port $(PORT)
-
-serve-onnx-cuda-fp16:
 	$(WITH_CUDA) INFERENCE_BACKEND=onnx-cuda ONNX_MODEL_PATH=$(ONNX_MODEL_FP16) DEFAULT_PRECISION=fp16 ALLOWED_PRECISIONS=fp16 INFERENCE_BATCH_SIZE=$(BATCH_SIZE) MAX_BATCH_TOKENS=$(MAX_BATCH_TOKENS) uv run uvicorn app.main:app --host $(HOST) --port $(PORT)
 
 serve-ort-trt:
@@ -48,9 +45,6 @@ onnx-export-fp16:
 	$(WITH_CUDA) $(PY) scripts/export_onnx.py --model-name $(MODEL_NAME) --output $(ONNX_MODEL_FP16) --max-length $(MAX_LENGTH) --fp16
 
 onnx-cuda-sample:
-	$(WITH_CUDA) $(PY) scripts/run_accelerated.py --backend onnx-cuda --precision fp32 --texts $(SAMPLE_TEXTS) --onnx $(ONNX_MODEL) --batch-size $(BATCH_SIZE) --max-batch-tokens $(MAX_BATCH_TOKENS)
-
-onnx-cuda-sample-fp16:
 	$(WITH_CUDA) $(PY) scripts/run_accelerated.py --backend onnx-cuda --precision fp16 --texts $(SAMPLE_TEXTS) --onnx $(ONNX_MODEL_FP16) --batch-size $(BATCH_SIZE) --max-batch-tokens $(MAX_BATCH_TOKENS)
 
 ort-trt-sample:
