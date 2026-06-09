@@ -1,0 +1,39 @@
+FROM python:3.10-slim
+
+WORKDIR /opt/program
+
+ENV PYTHONUNBUFFERED=1 \
+    PORT=8080 \
+    HF_HOME=/opt/program/.cache/huggingface \
+    MODEL_NAME=yangheng/deberta-v3-base-absa-v1.1 \
+    DEFAULT_PRECISION=fp16 \
+    ALLOWED_PRECISIONS=fp16 \
+    INFERENCE_BACKEND=onnx-cuda \
+    ONNX_MODEL_PATH=/opt/program/artifacts/model.onnx \
+    INFERENCE_BATCH_SIZE=32 \
+    MAX_BATCH_TOKENS=16384
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+
+COPY pyproject.toml README.md ./
+COPY app ./app
+COPY scripts ./scripts
+
+RUN python -m pip install --no-cache-dir -e ".[onnx]"
+
+ARG EXPORT_ONNX=1
+RUN if [ "$EXPORT_ONNX" = "1" ]; then \
+      python scripts/export_onnx.py --model-name "$MODEL_NAME" --output "$ONNX_MODEL_PATH"; \
+    fi
+
+RUN printf '#!/bin/sh\nexec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}\n' > /usr/local/bin/serve \
+    && chmod +x /usr/local/bin/serve
+
+EXPOSE 8080
+
+CMD ["serve"]

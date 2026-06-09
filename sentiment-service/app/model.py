@@ -11,12 +11,16 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from app.config import (
     DEVICE,
     INFERENCE_BATCH_SIZE,
+    INFERENCE_BACKEND,
     MAX_BATCH_TOKENS,
     MAX_LENGTH,
     MODEL_NAME,
     NEGATIVE_THRESHOLD,
+    ONNX_MODEL_PATH,
     PAD_TO_MULTIPLE_OF,
     SORT_BATCH_BY_LENGTH,
+    TRT_ENGINE_PATH,
+    ORT_TRT_CACHE_PATH,
 )
 
 PRECISIONS = ("fp32", "fp16", "int8")
@@ -33,8 +37,26 @@ class DeBERTaABSA:
             raise ValueError(f"Unknown precision {precision!r}, expected {PRECISIONS}")
         self.precision = precision
 
-        print(f"[Model] Loading DeBERTa ABSA ({MODEL_NAME}) precision={precision}...")
+        self.backend = INFERENCE_BACKEND
+        print(
+            f"[Model] Loading DeBERTa ABSA ({MODEL_NAME}) "
+            f"precision={precision} backend={self.backend}..."
+        )
         self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+
+        if self.backend != "pytorch":
+            if self.backend in {"onnx-cuda", "ort-trt", "tensorrt"}:
+                self.device = "cuda"
+            else:
+                self.device = DEVICE
+            self.model = self._load_accelerated_runner()
+            self.pad_to_multiple_of = self._resolve_pad_to_multiple_of()
+            print(
+                f"[Model] Loaded precision={precision} backend={self.backend} "
+                f"on {self.device}"
+            )
+            return
+
         model = AutoModelForSequenceClassification.from_pretrained(MODEL_NAME)
         model.eval()
 
@@ -56,7 +78,33 @@ class DeBERTaABSA:
 
         self.model = model
         self.pad_to_multiple_of = self._resolve_pad_to_multiple_of()
-        print(f"[Model] Loaded precision={precision} on {self.device}")
+        print(f"[Model] Loaded precision={precision} backend=pytorch on {self.device}")
+
+    def _load_accelerated_runner(self):
+        if self.backend == "onnx-cuda":
+            return OnnxRuntimeRunner(
+                ONNX_MODEL_PATH,
+                providers=["CUDAExecutionProvider", "CPUExecutionProvider"],
+            )
+        if self.backend == "ort-trt":
+            return OnnxRuntimeRunner(
+                ONNX_MODEL_PATH,
+                providers=[
+                    (
+                        "TensorrtExecutionProvider",
+                        {
+                            "trt_fp16_enable": self.precision == "fp16",
+                            "trt_engine_cache_enable": True,
+                            "trt_engine_cache_path": ORT_TRT_CACHE_PATH,
+                        },
+                    ),
+                    "CUDAExecutionProvider",
+                    "CPUExecutionProvider",
+                ],
+            )
+        if self.backend == "tensorrt":
+            return TensorRTRunner(TRT_ENGINE_PATH)
+        raise ValueError(f"Unsupported backend {self.backend!r}")
 
     def _resolve_pad_to_multiple_of(self) -> int | None:
         if PAD_TO_MULTIPLE_OF > 0:
@@ -89,7 +137,8 @@ class DeBERTaABSA:
 
         with torch.inference_mode():
             outputs = self.model(**inputs)
-            probs = torch.softmax(outputs.logits, dim=-1).detach().cpu()
+            logits = outputs.logits if hasattr(outputs, "logits") else outputs
+            probs = torch.softmax(logits, dim=-1).detach().cpu()
             pred_label = torch.argmax(probs, dim=-1).item()
             confidence = probs[0][pred_label].item()
 
@@ -166,7 +215,8 @@ class DeBERTaABSA:
 
         with torch.inference_mode():
             outputs = self.model(**inputs)
-            probs = torch.softmax(outputs.logits, dim=-1).detach().cpu()
+            logits = outputs.logits if hasattr(outputs, "logits") else outputs
+            probs = torch.softmax(logits, dim=-1).detach().cpu()
             pred_labels = torch.argmax(probs, dim=-1).detach().cpu()
 
         results = []
@@ -188,3 +238,70 @@ class DeBERTaABSA:
             })
 
         return results
+
+
+class OnnxRuntimeRunner:
+    def __init__(self, model_path: str, providers) -> None:
+        try:
+            import onnxruntime as ort
+        except ImportError as exc:
+            raise RuntimeError(
+                "onnxruntime-gpu is required for ONNX accelerated backends. "
+                "Install with `uv sync --extra onnx`."
+            ) from exc
+
+        self.session = ort.InferenceSession(model_path, providers=providers)
+        self.input_names = {input_meta.name for input_meta in self.session.get_inputs()}
+
+    def __call__(self, **inputs):
+        ort_inputs = {
+            name: tensor.detach().cpu().numpy()
+            for name, tensor in inputs.items()
+            if name in self.input_names
+        }
+        logits = self.session.run(["logits"], ort_inputs)[0]
+        return torch.from_numpy(logits)
+
+
+class TensorRTRunner:
+    def __init__(self, engine_path: str) -> None:
+        try:
+            import tensorrt as trt
+        except ImportError as exc:
+            raise RuntimeError(
+                "TensorRT is required for native TensorRT backend. "
+                "Install with `uv sync --extra tensorrt` in a CUDA/TensorRT image."
+            ) from exc
+
+        self.trt = trt
+        self.logger = trt.Logger(trt.Logger.WARNING)
+        with open(engine_path, "rb") as engine_file:
+            runtime = trt.Runtime(self.logger)
+            self.engine = runtime.deserialize_cuda_engine(engine_file.read())
+        if self.engine is None:
+            raise RuntimeError(f"Failed to load TensorRT engine at {engine_path}")
+        self.context = self.engine.create_execution_context()
+        self.tensor_names = [
+            self.engine.get_tensor_name(i) for i in range(self.engine.num_io_tensors)
+        ]
+
+    def __call__(self, **inputs):
+        cuda_inputs = {name: tensor.contiguous() for name, tensor in inputs.items()}
+        for name, tensor in cuda_inputs.items():
+            if name in self.tensor_names:
+                self.context.set_input_shape(name, tuple(tensor.shape))
+
+        output_name = "logits" if "logits" in self.tensor_names else self.tensor_names[-1]
+        output_shape = tuple(self.context.get_tensor_shape(output_name))
+        logits = torch.empty(output_shape, dtype=torch.float32, device="cuda")
+
+        tensors = {**cuda_inputs, output_name: logits}
+        for name, tensor in tensors.items():
+            if name in self.tensor_names:
+                self.context.set_tensor_address(name, tensor.data_ptr())
+
+        stream = torch.cuda.current_stream().cuda_stream
+        ok = self.context.execute_async_v3(stream)
+        if not ok:
+            raise RuntimeError("TensorRT execute_async_v3 failed")
+        return logits

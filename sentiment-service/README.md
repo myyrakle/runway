@@ -45,6 +45,9 @@ CPU wheel을 사용한다.
 docker build -f docker/Dockerfile.sagemaker-cpu -t sentiment-service:cpu .
 docker build -f docker/Dockerfile.sagemaker-cu128-fp32 -t sentiment-service:cu128-fp32 .
 docker build -f docker/Dockerfile.sagemaker-cu128-fp16 -t sentiment-service:cu128-fp16 .
+docker build -f docker/Dockerfile.sagemaker-cu128-onnx-cuda -t sentiment-service:cu128-onnx-cuda .
+docker build -f docker/Dockerfile.sagemaker-cu128-ort-trt -t sentiment-service:cu128-ort-trt .
+docker build -f docker/Dockerfile.sagemaker-cu128-tensorrt -t sentiment-service:cu128-tensorrt .
 ```
 
 CUDA 로딩 확인:
@@ -63,6 +66,10 @@ PY
 | 변수 | 기본값 | 설명 |
 |------|--------|------|
 | `MODEL_NAME` | `yangheng/deberta-v3-base-absa-v1.1` | HF repo id |
+| `INFERENCE_BACKEND` | `pytorch` | `pytorch`, `onnx-cuda`, `ort-trt`, `tensorrt` |
+| `ONNX_MODEL_PATH` | `artifacts/model.onnx` | ONNX backend artifact path |
+| `TRT_ENGINE_PATH` | `artifacts/model.plan` | native TensorRT engine path |
+| `ORT_TRT_CACHE_PATH` | `artifacts/ort_trt_cache` | ONNX Runtime TensorRT EP engine cache |
 | `NEGATIVE_THRESHOLD` | `0.6` | 부정 판정 임계값 |
 | `MAX_LENGTH` | `512` | 토큰 truncation 길이 |
 | `MAX_BATCH_ITEMS` | `1024` | `/analyze/batch`, `/invocations` 배치 요청의 최대 텍스트 수 |
@@ -147,6 +154,49 @@ INFERENCE_BATCH_SIZE=16 \
 MAX_BATCH_TOKENS=4096 \
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8001
 ```
+
+### ONNX/TensorRT 실행
+
+PyTorch fp16 baseline을 먼저 측정한 뒤 아래 순서로 비교한다.
+
+```bash
+make onnx-export
+make onnx-cuda-sample
+make ort-trt-sample
+make trt-build
+make trt-sample
+```
+
+서비스로 띄울 때는 artifact path와 backend를 지정한다.
+
+```bash
+INFERENCE_BACKEND=onnx-cuda \
+ONNX_MODEL_PATH=artifacts/model.onnx \
+DEFAULT_PRECISION=fp16 \
+ALLOWED_PRECISIONS=fp16 \
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8001
+```
+
+```bash
+INFERENCE_BACKEND=ort-trt \
+ONNX_MODEL_PATH=artifacts/model.onnx \
+ORT_TRT_CACHE_PATH=artifacts/ort_trt_cache \
+DEFAULT_PRECISION=fp16 \
+ALLOWED_PRECISIONS=fp16 \
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8001
+```
+
+```bash
+INFERENCE_BACKEND=tensorrt \
+TRT_ENGINE_PATH=artifacts/model.plan \
+DEFAULT_PRECISION=fp16 \
+ALLOWED_PRECISIONS=fp16 \
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8001
+```
+
+ONNX Runtime TensorRT EP와 native TensorRT는 CUDA/TensorRT 런타임 버전과 GPU
+아키텍처 영향을 크게 받는다. T4에서 만든 TensorRT engine은 같은 계열 배포
+환경에서 재사용하는 것을 권장한다.
 
 ```bash
 curl -X POST localhost:8001/analyze \

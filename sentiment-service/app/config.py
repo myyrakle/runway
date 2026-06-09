@@ -6,9 +6,20 @@ import os
 import torch
 
 VALID_PRECISIONS = ("fp32", "fp16", "int8")
+VALID_BACKENDS = ("pytorch", "onnx-cuda", "ort-trt", "tensorrt")
 
 # ABSA model (HuggingFace repo id).
 MODEL_NAME = os.environ.get("MODEL_NAME", "yangheng/deberta-v3-base-absa-v1.1")
+
+# Inference backend. Non-PyTorch backends require exported artifacts.
+INFERENCE_BACKEND = os.environ.get("INFERENCE_BACKEND", "pytorch")
+if INFERENCE_BACKEND not in VALID_BACKENDS:
+    raise ValueError(
+        f"INFERENCE_BACKEND must be one of {VALID_BACKENDS}, got {INFERENCE_BACKEND!r}"
+    )
+ONNX_MODEL_PATH = os.environ.get("ONNX_MODEL_PATH", "artifacts/model.onnx")
+TRT_ENGINE_PATH = os.environ.get("TRT_ENGINE_PATH", "artifacts/model.plan")
+ORT_TRT_CACHE_PATH = os.environ.get("ORT_TRT_CACHE_PATH", "artifacts/ort_trt_cache")
 
 # Negative sentiment decision threshold (label==negative AND confidence >= this).
 NEGATIVE_THRESHOLD = float(os.environ.get("NEGATIVE_THRESHOLD", "0.6"))

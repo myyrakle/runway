@@ -1,0 +1,38 @@
+ARG BASE_IMAGE=nvcr.io/nvidia/tensorrt:25.05-py3
+FROM ${BASE_IMAGE}
+
+WORKDIR /opt/program
+
+ENV PYTHONUNBUFFERED=1 \
+    PORT=8080 \
+    HF_HOME=/opt/program/.cache/huggingface \
+    MODEL_NAME=yangheng/deberta-v3-base-absa-v1.1 \
+    DEFAULT_PRECISION=fp16 \
+    ALLOWED_PRECISIONS=fp16 \
+    INFERENCE_BACKEND=tensorrt \
+    ONNX_MODEL_PATH=/opt/program/artifacts/model.onnx \
+    TRT_ENGINE_PATH=/opt/program/artifacts/model.plan \
+    INFERENCE_BATCH_SIZE=32 \
+    MAX_BATCH_TOKENS=16384
+
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+
+COPY pyproject.toml README.md ./
+COPY app ./app
+COPY scripts ./scripts
+
+RUN python -m pip install --no-cache-dir -e ".[tensorrt]"
+
+ARG BUILD_ENGINE=1
+RUN if [ "$BUILD_ENGINE" = "1" ]; then \
+      python scripts/export_onnx.py --model-name "$MODEL_NAME" --output "$ONNX_MODEL_PATH" && \
+      python scripts/build_trt_engine.py --onnx "$ONNX_MODEL_PATH" --output "$TRT_ENGINE_PATH" --opt-batch "$INFERENCE_BATCH_SIZE" --max-batch "$INFERENCE_BATCH_SIZE" --max-seq 512 --fp16; \
+    fi
+
+RUN printf '#!/bin/sh\nexec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}\n' > /usr/local/bin/serve \
+    && chmod +x /usr/local/bin/serve
+
+EXPOSE 8080
+
+CMD ["serve"]

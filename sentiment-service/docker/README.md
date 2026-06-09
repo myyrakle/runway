@@ -11,6 +11,9 @@ SageMaker용 Dockerfile은 이 디렉터리에서 관리한다. 빌드 컨텍스
 | `docker/Dockerfile.sagemaker-cpu-int8` | `sentiment-service:cpu-int8` | PyTorch CPU wheel | `DEFAULT_PRECISION=int8`, `ALLOWED_PRECISIONS=int8` |
 | `docker/Dockerfile.sagemaker-cu128-fp32` | `sentiment-service:cu128-fp32` | PyTorch CUDA 12.8 wheel | `DEFAULT_PRECISION=fp32`, `ALLOWED_PRECISIONS=fp32` |
 | `docker/Dockerfile.sagemaker-cu128-fp16` | `sentiment-service:cu128-fp16` | PyTorch CUDA 12.8 wheel | `DEFAULT_PRECISION=fp16`, `ALLOWED_PRECISIONS=fp16` |
+| `docker/Dockerfile.sagemaker-cu128-onnx-cuda` | `sentiment-service:cu128-onnx-cuda` | ONNX Runtime CUDA EP | `INFERENCE_BACKEND=onnx-cuda` |
+| `docker/Dockerfile.sagemaker-cu128-ort-trt` | `sentiment-service:cu128-ort-trt` | ONNX Runtime TensorRT EP | `INFERENCE_BACKEND=ort-trt` |
+| `docker/Dockerfile.sagemaker-cu128-tensorrt` | `sentiment-service:cu128-tensorrt` | native TensorRT engine | `INFERENCE_BACKEND=tensorrt` |
 
 ## Build
 
@@ -19,6 +22,9 @@ docker build -f docker/Dockerfile.sagemaker-cpu -t sentiment-service:cpu .
 docker build -f docker/Dockerfile.sagemaker-cpu-int8 -t sentiment-service:cpu-int8 .
 docker build -f docker/Dockerfile.sagemaker-cu128-fp32 -t sentiment-service:cu128-fp32 .
 docker build -f docker/Dockerfile.sagemaker-cu128-fp16 -t sentiment-service:cu128-fp16 .
+docker build -f docker/Dockerfile.sagemaker-cu128-onnx-cuda -t sentiment-service:cu128-onnx-cuda .
+docker build -f docker/Dockerfile.sagemaker-cu128-ort-trt -t sentiment-service:cu128-ort-trt .
+docker build -f docker/Dockerfile.sagemaker-cu128-tensorrt -t sentiment-service:cu128-tensorrt .
 ```
 
 ## Local run
@@ -45,6 +51,24 @@ CUDA fp16 image:
 
 ```bash
 docker run --rm --gpus all -p 8080:8080 sentiment-service:cu128-fp16
+```
+
+ONNX Runtime CUDA image:
+
+```bash
+docker run --rm --gpus all -p 8080:8080 sentiment-service:cu128-onnx-cuda
+```
+
+ONNX Runtime TensorRT EP image:
+
+```bash
+docker run --rm --gpus all -p 8080:8080 sentiment-service:cu128-ort-trt
+```
+
+Native TensorRT image:
+
+```bash
+docker run --rm --gpus all -p 8080:8080 sentiment-service:cu128-tensorrt
 ```
 
 ## Precision behavior
@@ -92,3 +116,17 @@ Batch inference defaults:
 - `MAX_BATCH_TOKENS=0`: disabled by default; set a positive approximate padded-token budget per model forward.
 - `SORT_BATCH_BY_LENGTH=1`: sort request items by approximate length before chunking, then restore response order.
 - `PAD_TO_MULTIPLE_OF=0`: auto mode; CUDA fp16 uses tokenizer `pad_to_multiple_of=8`.
+
+## Accelerated backends
+
+The accelerated GPU backends require exported artifacts:
+
+- `onnx-cuda`: loads `ONNX_MODEL_PATH` with ONNX Runtime `CUDAExecutionProvider`.
+- `ort-trt`: loads `ONNX_MODEL_PATH` with ONNX Runtime `TensorrtExecutionProvider`, then falls back to CUDA EP.
+- `tensorrt`: loads `TRT_ENGINE_PATH` as a native TensorRT engine.
+
+The Dockerfiles export/build artifacts during image build by default. For faster
+iteration, set `EXPORT_ONNX=0` or `BUILD_ENGINE=0` and mount prebuilt artifacts.
+TensorRT images use `nvcr.io/nvidia/tensorrt:25.05-py3` by default; override
+`BASE_IMAGE` if your CUDA/TensorRT runtime must match a different deployment
+environment.
