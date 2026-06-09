@@ -17,7 +17,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 
-from app.config import DEVICE, MODEL_NAME
+from app.config import DEFAULT_PRECISION, DEVICE, MODEL_NAME, is_precision_allowed
 from app.model import DeBERTaABSA
 from app.schemas import (
     AnalyzeRequest,
@@ -36,6 +36,11 @@ _load_lock = threading.Lock()
 
 def _get_variant(precision: str) -> DeBERTaABSA:
     """Return the model for a precision, loading + caching on first use."""
+    if not is_precision_allowed(precision):
+        raise HTTPException(
+            status_code=400,
+            detail=f"Precision {precision!r} is not enabled for this container",
+        )
     cached = _models.get(precision)
     if cached is not None:
         return cached
@@ -50,7 +55,7 @@ def _get_variant(precision: str) -> DeBERTaABSA:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    _models["fp32"] = DeBERTaABSA(precision="fp32")
+    _models[DEFAULT_PRECISION] = DeBERTaABSA(precision=DEFAULT_PRECISION)
     yield
     _models.clear()
 
@@ -65,7 +70,7 @@ app = FastAPI(
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
     return HealthResponse(
-        status="ok" if "fp32" in _models else "loading",
+        status="ok" if DEFAULT_PRECISION in _models else "loading",
         model=MODEL_NAME,
         device=DEVICE,
         loaded_precisions=sorted(_models.keys()),
@@ -74,7 +79,7 @@ async def health() -> HealthResponse:
 
 @app.get("/ping")
 async def ping() -> dict[str, str]:
-    return {"status": "ok" if "fp32" in _models else "loading"}
+    return {"status": "ok" if DEFAULT_PRECISION in _models else "loading"}
 
 
 @app.post("/invocations", response_model=SentimentResult | BatchAnalyzeResponse)

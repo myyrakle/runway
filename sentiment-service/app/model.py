@@ -8,7 +8,13 @@ from __future__ import annotations
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
-from app.config import DEVICE, MAX_LENGTH, MODEL_NAME, NEGATIVE_THRESHOLD
+from app.config import (
+    DEVICE,
+    INFERENCE_BATCH_SIZE,
+    MAX_LENGTH,
+    MODEL_NAME,
+    NEGATIVE_THRESHOLD,
+)
 
 PRECISIONS = ("fp32", "fp16", "int8")
 
@@ -63,9 +69,9 @@ class DeBERTaABSA:
         """Single-text sentiment analysis."""
         inputs = self._tokenize(text, aspect)
 
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = self.model(**inputs)
-            probs = torch.softmax(outputs.logits, dim=-1)
+            probs = torch.softmax(outputs.logits, dim=-1).detach().cpu()
             pred_label = torch.argmax(probs, dim=-1).item()
             confidence = probs[0][pred_label].item()
 
@@ -88,12 +94,20 @@ class DeBERTaABSA:
         if not texts:
             return []
 
+        results = []
+        for start in range(0, len(texts), INFERENCE_BATCH_SIZE):
+            chunk = texts[start:start + INFERENCE_BATCH_SIZE]
+            results.extend(self._analyze_batch_chunk(chunk, aspect))
+        return results
+
+    def _analyze_batch_chunk(self, texts: list[str], aspect: str) -> list[dict]:
+        """Run one bounded model forward pass."""
         inputs = self._tokenize(texts, [aspect] * len(texts))
 
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = self.model(**inputs)
-            probs = torch.softmax(outputs.logits, dim=-1)
-            pred_labels = torch.argmax(probs, dim=-1)
+            probs = torch.softmax(outputs.logits, dim=-1).detach().cpu()
+            pred_labels = torch.argmax(probs, dim=-1).detach().cpu()
 
         results = []
         for label, prob in zip(pred_labels, probs):

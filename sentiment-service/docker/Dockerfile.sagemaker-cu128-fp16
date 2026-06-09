@@ -5,7 +5,9 @@ WORKDIR /opt/program
 ENV PYTHONUNBUFFERED=1 \
     PORT=8080 \
     HF_HOME=/opt/program/.cache/huggingface \
-    MODEL_NAME=yangheng/deberta-v3-base-absa-v1.1
+    MODEL_NAME=yangheng/deberta-v3-base-absa-v1.1 \
+    DEFAULT_PRECISION=fp16 \
+    ALLOWED_PRECISIONS=fp16
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends build-essential curl \

@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field
 
+from app.config import DEFAULT_PRECISION, MAX_BATCH_ITEMS
+
 Precision = Literal["fp32", "fp16", "int8"]
 BenchMode = Literal["single", "batch"]
 
@@ -12,13 +14,18 @@ BenchMode = Literal["single", "batch"]
 class AnalyzeRequest(BaseModel):
     text: str = Field(..., description="Text to analyze")
     aspect: str = Field("overall", description="ABSA aspect / target")
-    precision: Precision = Field("fp32", description="Model precision variant")
+    precision: Precision = Field(DEFAULT_PRECISION, description="Model precision variant")
 
 
 class BatchAnalyzeRequest(BaseModel):
-    texts: list[str] = Field(..., description="Texts to analyze")
+    texts: list[str] = Field(
+        ...,
+        min_length=1,
+        max_length=MAX_BATCH_ITEMS,
+        description="Texts to analyze",
+    )
     aspect: str = Field("overall", description="ABSA aspect / target")
-    precision: Precision = Field("fp32", description="Model precision variant")
+    precision: Precision = Field(DEFAULT_PRECISION, description="Model precision variant")
 
 
 class Probs(BaseModel):
@@ -51,10 +58,10 @@ class BenchmarkRequest(BaseModel):
         description="Sample text to repeatedly analyze",
     )
     aspect: str = Field("overall", description="ABSA aspect / target")
-    precision: Precision = Field("fp32", description="Model precision variant to bench")
+    precision: Precision = Field(DEFAULT_PRECISION, description="Model precision variant to bench")
     mode: BenchMode = Field("single", description="single = analyze, batch = analyze_batch")
     batch_size: int = Field(
-        32, ge=1, le=4096,
+        32, ge=1, le=MAX_BATCH_ITEMS,
         description="Texts per call when mode=batch (text is repeated)",
     )
     iterations: int = Field(20, ge=1, le=1000, description="Timed iterations")
