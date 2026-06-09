@@ -1,6 +1,16 @@
 # sentiment-service
 
-DeBERTa v3 ABSA (`yangheng/deberta-v3-base-absa-v1.1`) 기반 Aspect-Based 감성분석을 FastAPI로 서빙하는 독립 서비스 (fp32, threshold 0.6, ABSA 형식).
+DeBERTa v3 ABSA (`yangheng/deberta-v3-base-absa-v1.1`) 기반 Aspect-Based 감성분석을 FastAPI로 서빙하는 독립 서비스 (threshold 0.6, ABSA 형식).
+
+## Precision 변형
+
+추론/벤치 엔드포인트에서 `precision`으로 모델 변형을 선택한다. 변형은 첫 요청 시 lazy 로드되어 캐시된다 (변형마다 메모리에 별도 상주).
+
+| precision | 설명 | 제약 |
+|-----------|------|------|
+| `fp32` (기본) | 원본 정밀도 | — |
+| `fp16` | half precision | CUDA 전용 (CPU면 400) |
+| `int8` | 동적 양자화 (Linear) | CPU에서 실행 |
 
 ## 실행
 
@@ -46,25 +56,32 @@ curl -X POST localhost:8001/analyze \
 
 ### 벤치마크
 
-워밍업(`warmup`) 후 `iterations`회 반복 측정. 디폴트 바디로 그냥 호출해도 된다.
+워밍업(`warmup`) 후 `iterations`회 반복 측정. `precision`으로 변형을, `mode`로 단건(`single`) vs 배치(`batch`, `batch_size`개 동시)를 고른다. 디폴트 바디로 그냥 호출해도 된다.
 
 ```bash
+# fp16, 64개 배치 인코딩 처리량
 curl -X POST localhost:8001/benchmark \
   -H 'Content-Type: application/json' \
-  -d '{"iterations": 50, "warmup": 5}'
+  -d '{"precision": "fp16", "mode": "batch", "batch_size": 64, "iterations": 50, "warmup": 5}'
 ```
 
 ```json
 {
   "model": "yangheng/deberta-v3-base-absa-v1.1",
+  "precision": "fp16",
   "device": "cuda",
+  "mode": "batch",
+  "batch_size": 64,
   "iterations": 50,
   "warmup": 5,
-  "avg_ms": 8.3,
-  "min_ms": 7.1,
-  "max_ms": 12.4,
-  "total_ms": 415.0
+  "avg_ms": 41.2,
+  "min_ms": 38.9,
+  "max_ms": 55.1,
+  "total_ms": 2060.0,
+  "per_item_ms": 0.64
 }
 ```
+
+`mode=single`이면 `batch_size`는 1, `per_item_ms`는 null이다. 변형 비교는 `precision`만 바꿔 같은 요청을 반복 호출하면 된다.
 
 Swagger: `http://localhost:8001/docs`

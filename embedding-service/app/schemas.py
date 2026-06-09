@@ -1,9 +1,13 @@
 """Pydantic request/response models for the embedding service."""
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field
 
 from app.config import DEFAULT_BATCH_SIZE, DEFAULT_PREFIX
+
+Precision = Literal["fp32", "fp16"]
 
 
 class EmbedRequest(BaseModel):
@@ -14,6 +18,7 @@ class EmbedRequest(BaseModel):
                     '"passage: " for long documents/quotes.',
     )
     batch_size: int = Field(DEFAULT_BATCH_SIZE, ge=1, description="Encode batch size")
+    precision: Precision = Field("fp32", description="Model precision variant")
 
 
 class EmbedResponse(BaseModel):
@@ -27,6 +32,7 @@ class HealthResponse(BaseModel):
     model: str
     device: str
     dim: int
+    loaded_precisions: list[str]
 
 
 class BenchmarkRequest(BaseModel):
@@ -36,12 +42,14 @@ class BenchmarkRequest(BaseModel):
     )
     prefix: str = Field(DEFAULT_PREFIX, description="E5 task prefix")
     batch_size: int = Field(DEFAULT_BATCH_SIZE, ge=1, description="Encode batch size")
+    precision: Precision = Field("fp32", description="Model precision variant to bench")
     iterations: int = Field(20, ge=1, le=1000, description="Timed iterations")
     warmup: int = Field(2, ge=0, le=100, description="Untimed warmup iterations")
 
 
 class BenchmarkResponse(BaseModel):
     model: str
+    precision: str
     device: str
     iterations: int
     warmup: int
@@ -50,3 +58,5 @@ class BenchmarkResponse(BaseModel):
     min_ms: float
     max_ms: float
     total_ms: float
+    # avg_ms / texts_per_iteration
+    per_text_ms: float

@@ -2,6 +2,15 @@
 
 Multilingual E5 Large (`intfloat/multilingual-e5-large`, 1024-dim) 텍스트 임베딩을 FastAPI로 서빙하는 독립 서비스 (E5 prefix + L2 정규화).
 
+## Precision 변형
+
+추론/벤치 엔드포인트에서 `precision`으로 모델 변형을 선택한다. 변형은 첫 요청 시 lazy 로드되어 캐시된다.
+
+| precision | 설명 | 제약 |
+|-----------|------|------|
+| `fp32` (기본) | 원본 정밀도 | — |
+| `fp16` | half precision | CUDA 전용 (CPU면 400) |
+
 ## 실행
 
 ```bash
@@ -47,25 +56,27 @@ curl -X POST localhost:8002/embed \
 
 ### 벤치마크
 
-워밍업(`warmup`) 후 `iterations`회 반복 인코딩 측정. `texts`로 배치 크기를 바꿔 처리량을 본다.
+워밍업(`warmup`) 후 `iterations`회 반복 인코딩 측정. `precision`으로 변형을, `texts`로 배치 크기를 바꿔 처리량을 본다. `per_text_ms`는 텍스트당 평균(avg_ms / 텍스트 수).
 
 ```bash
 curl -X POST localhost:8002/benchmark \
   -H 'Content-Type: application/json' \
-  -d '{"texts": ["문장1", "문장2"], "iterations": 50, "warmup": 5}'
+  -d '{"texts": ["문장1", "문장2"], "precision": "fp16", "iterations": 50, "warmup": 5}'
 ```
 
 ```json
 {
   "model": "intfloat/multilingual-e5-large",
+  "precision": "fp16",
   "device": "cuda",
   "iterations": 50,
   "warmup": 5,
   "texts_per_iteration": 2,
-  "avg_ms": 21.7,
-  "min_ms": 19.2,
-  "max_ms": 38.5,
-  "total_ms": 1085.0
+  "avg_ms": 14.3,
+  "min_ms": 12.8,
+  "max_ms": 25.1,
+  "total_ms": 715.0,
+  "per_text_ms": 7.15
 }
 ```
 

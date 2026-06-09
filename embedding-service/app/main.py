@@ -2,14 +2,16 @@
 
 Endpoints:
   GET  /health
-  POST /embed   list of texts -> L2-normalized vectors
+  POST /embed      list of texts -> L2-normalized vectors (precision selectable)
+  POST /benchmark  encode latency stats (precision selectable)
 """
 from __future__ import annotations
 
+import threading
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 
 from app.config import EMBEDDING_DIM, MODEL_NAME
@@ -22,46 +24,55 @@ from app.schemas import (
     HealthResponse,
 )
 
-_model: E5Embedder | None = None
+# Lazily-loaded model variants, keyed by precision. fp32 loaded on startup.
+_models: dict[str, E5Embedder] = {}
+_load_lock = threading.Lock()
+
+
+def _get_variant(precision: str) -> E5Embedder:
+    """Return the model for a precision, loading + caching on first use."""
+    cached = _models.get(precision)
+    if cached is not None:
+        return cached
+    with _load_lock:
+        if precision not in _models:
+            try:
+                _models[precision] = E5Embedder(precision=precision)
+            except ValueError as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return _models[precision]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    global _model
-    _model = E5Embedder()
+    _models["fp32"] = E5Embedder(precision="fp32")
     yield
-    _model = None
+    _models.clear()
 
 
 app = FastAPI(
     title="Embedding Service (multilingual-e5-large)",
-    version="0.1.0",
+    version="0.2.0",
     lifespan=lifespan,
 )
 
 
-def get_model() -> E5Embedder:
-    if _model is None:
-        raise RuntimeError("Model not loaded")
-    return _model
-
-
 @app.get("/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
+    fp32 = _models.get("fp32")
     return HealthResponse(
-        status="ok" if _model is not None else "loading",
+        status="ok" if fp32 is not None else "loading",
         model=MODEL_NAME,
-        device=_model.device if _model is not None else "unknown",
+        device=fp32.device if fp32 is not None else "unknown",
         dim=EMBEDDING_DIM,
+        loaded_precisions=sorted(_models.keys()),
     )
 
 
 @app.post("/embed", response_model=EmbedResponse)
 async def embed(req: EmbedRequest) -> EmbedResponse:
-    # sentence-transformers encode is blocking → offload to threadpool.
-    arr = await run_in_threadpool(
-        get_model().generate, req.texts, req.prefix, req.batch_size
-    )
+    model = await run_in_threadpool(_get_variant, req.precision)
+    arr = await run_in_threadpool(model.generate, req.texts, req.prefix, req.batch_size)
     vectors = arr.tolist()
     dim = arr.shape[1] if arr.ndim == 2 and arr.shape[0] > 0 else EMBEDDING_DIM
     return EmbedResponse(embeddings=vectors, dim=dim, count=len(vectors))
@@ -69,8 +80,9 @@ async def embed(req: EmbedRequest) -> EmbedResponse:
 
 @app.post("/benchmark", response_model=BenchmarkResponse)
 async def benchmark(req: BenchmarkRequest) -> BenchmarkResponse:
-    """Time repeated batch encoding. Warmup runs are excluded from stats."""
-    model = get_model()
+    """Time repeated batch encoding for a precision variant. Warmup excluded."""
+    model = await run_in_threadpool(_get_variant, req.precision)
+    n = len(req.texts)
 
     def run() -> list[float]:
         for _ in range(req.warmup):
@@ -83,14 +95,17 @@ async def benchmark(req: BenchmarkRequest) -> BenchmarkResponse:
         return durations
 
     durations = await run_in_threadpool(run)
+    avg_ms = sum(durations) / len(durations)
     return BenchmarkResponse(
         model=MODEL_NAME,
-        device=_model.device if _model is not None else "unknown",
+        precision=req.precision,
+        device=model.device,
         iterations=req.iterations,
         warmup=req.warmup,
-        texts_per_iteration=len(req.texts),
-        avg_ms=sum(durations) / len(durations),
+        texts_per_iteration=n,
+        avg_ms=avg_ms,
         min_ms=min(durations),
         max_ms=max(durations),
         total_ms=sum(durations),
+        per_text_ms=avg_ms / n if n else 0.0,
     )
