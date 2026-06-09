@@ -10,6 +10,7 @@ BATCH_SIZE ?= 32
 MAX_BATCH_TOKENS ?= 16384
 ONNX_MODEL ?= artifacts/model.onnx
 TRT_ENGINE ?= artifacts/model.plan
+ORT_TRT_CACHE ?= artifacts/ort_trt_cache
 SAMPLE_TEXTS ?= sample/texts.json
 
 # torch's cu128 wheel bundles the CUDA runtime as nvidia-* site-packages
@@ -18,11 +19,23 @@ SAMPLE_TEXTS ?= sample/texts.json
 # .venv after `uv sync`; run `uv sync` (or `uv sync --extra onnx/tensorrt`) first.
 WITH_CUDA = LD_LIBRARY_PATH="$$(ls -d $(VENV)/lib/python*/site-packages/nvidia/*/lib 2>/dev/null | tr '\n' ':')$$LD_LIBRARY_PATH"
 
-.PHONY: serve-fp16 onnx-export onnx-cuda-sample ort-trt-sample trt-build trt-sample
+.PHONY: serve-fp16 serve-onnx-cuda serve-ort-trt serve-tensorrt
+.PHONY: onnx-export onnx-cuda-sample ort-trt-sample trt-build trt-sample
 .PHONY: docker-build-onnx-cuda docker-build-ort-trt docker-build-tensorrt
 
+# Serve the FastAPI app (uvicorn). Each target sets the backend + artifact paths
+# the app reads at startup, plus the CUDA loader path. Hit http://HOST:PORT/docs.
 serve-fp16:
 	$(WITH_CUDA) DEFAULT_PRECISION=fp16 ALLOWED_PRECISIONS=fp16 INFERENCE_BATCH_SIZE=$(BATCH_SIZE) MAX_BATCH_TOKENS=$(MAX_BATCH_TOKENS) uv run uvicorn app.main:app --host $(HOST) --port $(PORT)
+
+serve-onnx-cuda:
+	$(WITH_CUDA) INFERENCE_BACKEND=onnx-cuda ONNX_MODEL_PATH=$(ONNX_MODEL) DEFAULT_PRECISION=$(PRECISION) ALLOWED_PRECISIONS=$(PRECISION) INFERENCE_BATCH_SIZE=$(BATCH_SIZE) MAX_BATCH_TOKENS=$(MAX_BATCH_TOKENS) uv run uvicorn app.main:app --host $(HOST) --port $(PORT)
+
+serve-ort-trt:
+	$(WITH_CUDA) INFERENCE_BACKEND=ort-trt ONNX_MODEL_PATH=$(ONNX_MODEL) ORT_TRT_CACHE_PATH=$(ORT_TRT_CACHE) DEFAULT_PRECISION=$(PRECISION) ALLOWED_PRECISIONS=$(PRECISION) INFERENCE_BATCH_SIZE=$(BATCH_SIZE) MAX_BATCH_TOKENS=$(MAX_BATCH_TOKENS) uv run uvicorn app.main:app --host $(HOST) --port $(PORT)
+
+serve-tensorrt:
+	$(WITH_CUDA) INFERENCE_BACKEND=tensorrt TRT_ENGINE_PATH=$(TRT_ENGINE) DEFAULT_PRECISION=$(PRECISION) ALLOWED_PRECISIONS=$(PRECISION) INFERENCE_BATCH_SIZE=$(BATCH_SIZE) MAX_BATCH_TOKENS=$(MAX_BATCH_TOKENS) uv run uvicorn app.main:app --host $(HOST) --port $(PORT)
 
 onnx-export:
 	$(WITH_CUDA) $(PY) scripts/export_onnx.py --model-name $(MODEL_NAME) --output $(ONNX_MODEL) --max-length $(MAX_LENGTH)
