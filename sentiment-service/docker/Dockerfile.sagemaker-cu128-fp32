@@ -21,6 +21,12 @@ COPY app ./app
 
 RUN python -m pip install --no-cache-dir -e .
 
+# torch cu128 bundles the CUDA runtime as nvidia-* site-packages
+# (libcusparseLt.so.0 etc.). pip's layout normally resolves these via RPATH, but
+# register the dirs with the loader so `import torch` is robust across bases.
+RUN python -c "import glob,os,site; dirs=[p for r in (site.getsitepackages()+[site.getusersitepackages()]) for p in glob.glob(os.path.join(r,'nvidia','*','lib'))]; open('/etc/ld.so.conf.d/nvidia-cuda-libs.conf','w').write('\n'.join(dirs)+'\n')" \
+    && ldconfig
+
 ARG PRELOAD_MODEL=1
 RUN if [ "$PRELOAD_MODEL" = "1" ]; then \
       python -c "import os; from transformers import AutoModelForSequenceClassification, AutoTokenizer; model_name = os.environ['MODEL_NAME']; AutoTokenizer.from_pretrained(model_name); AutoModelForSequenceClassification.from_pretrained(model_name)"; \

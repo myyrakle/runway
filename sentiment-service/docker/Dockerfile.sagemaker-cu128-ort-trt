@@ -24,6 +24,12 @@ COPY scripts ./scripts
 
 RUN python -m pip install --no-cache-dir -e ".[onnx]"
 
+# torch cu128 bundles the CUDA runtime as nvidia-* site-packages
+# (libcusparseLt.so.0 etc.). pip's layout normally resolves these via RPATH, but
+# register the dirs with the loader so `import torch` is robust across bases.
+RUN python -c "import glob,os,site; dirs=[p for r in (site.getsitepackages()+[site.getusersitepackages()]) for p in glob.glob(os.path.join(r,'nvidia','*','lib'))]; open('/etc/ld.so.conf.d/nvidia-cuda-libs.conf','w').write('\n'.join(dirs)+'\n')" \
+    && ldconfig
+
 ARG EXPORT_ONNX=1
 RUN if [ "$EXPORT_ONNX" = "1" ]; then \
       python scripts/export_onnx.py --model-name "$MODEL_NAME" --output "$ONNX_MODEL_PATH"; \
