@@ -26,6 +26,7 @@ from app.schemas import (
     BenchmarkRequest,
     BenchmarkResponse,
     HealthResponse,
+    InvocationRequest,
     SentimentResult,
 )
 
@@ -84,11 +85,11 @@ async def ping() -> dict[str, str]:
 
 @app.post("/invocations", response_model=SentimentResult | BatchAnalyzeResponse)
 async def invocations(
-    req: AnalyzeRequest | BatchAnalyzeRequest,
+    req: InvocationRequest,
 ) -> SentimentResult | BatchAnalyzeResponse:
-    if isinstance(req, BatchAnalyzeRequest):
-        return await _run_batch_analysis(req)
-    return await _run_single_analysis(req)
+    if req.text is not None:
+        return await _run_single_analysis(req.as_single_request())
+    return await _run_batch_analysis(req.as_batch_request())
 
 
 async def _run_single_analysis(req: AnalyzeRequest) -> SentimentResult:
