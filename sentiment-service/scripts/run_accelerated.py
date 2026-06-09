@@ -21,6 +21,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--engine", default="artifacts/model.plan")
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--max-batch-tokens", type=int, default=16384)
+    parser.add_argument(
+        "--warmup",
+        type=int,
+        default=2,
+        help="Warmup passes excluded from timing (covers ORT/cuDNN algo search).",
+    )
     parser.add_argument("--output", default="")
     return parser.parse_args()
 
@@ -40,6 +46,9 @@ def main() -> None:
     texts = json.loads(Path(args.texts).read_text())
     model = DeBERTaABSA(args.precision)
 
+    for _ in range(max(0, args.warmup)):
+        model.analyze_batch(texts, args.aspect)
+
     start = time.perf_counter()
     results = model.analyze_batch(texts, args.aspect)
     elapsed_ms = (time.perf_counter() - start) * 1000.0
@@ -47,6 +56,7 @@ def main() -> None:
         "backend": args.backend,
         "precision": args.precision,
         "items": len(texts),
+        "warmup": max(0, args.warmup),
         "total_ms": elapsed_ms,
         "per_item_ms": elapsed_ms / len(texts) if texts else None,
         "results": results,

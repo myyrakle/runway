@@ -160,14 +160,36 @@ uv run uvicorn app.main:app --host 0.0.0.0 --port 8001
 PyTorch fp16 baseline을 먼저 측정한 뒤 아래 순서로 비교한다.
 
 ```bash
-make onnx-export
-make onnx-cuda-sample
-make ort-trt-sample
-make trt-build
-make trt-sample
+make onnx-export            # fp32 ONNX (artifacts/model.onnx)
+make onnx-cuda-sample       # onnx-cuda, fp32 그래프
+make onnx-export-fp16       # fp16 ONNX (artifacts/model.fp16.onnx)
+make onnx-cuda-sample-fp16  # onnx-cuda, fp16 그래프 (Tensor Core)
+make ort-trt-sample         # ONNX Runtime TensorRT EP (fp16)
+make trt-build              # native TensorRT fp16 engine
+make trt-sample             # native TensorRT (fp16)
 ```
 
-서비스로 띄울 때는 artifact path와 backend를 지정한다.
+`*-sample` 타깃은 `--warmup`(기본 2회) 이후를 측정하므로 ORT/cuDNN 첫 실행의
+알고리즘 탐색 비용이 빠진다.
+
+> onnx-cuda 백엔드는 ONNX 그래프 자체의 정밀도를 그대로 실행한다. fp32 ONNX를
+> `--precision fp16`으로 돌려도 실제 연산은 fp32다. fp16 이득을 보려면
+> `onnx-export-fp16`으로 변환한 그래프(`onnxconverter_common.float16`,
+> `keep_io_types`로 int 입력·fp32 logits 유지)를 써야 한다. 반면 `ort-trt`와
+> native `tensorrt`는 엔진 빌드 시 fp16을 켜므로 fp32 ONNX에서 출발해도 fp16으로
+> 실행된다. fp16 변환은 정밀도 손실이 생길 수 있으니 `sample/`로 정확도를 확인한다.
+
+서비스(FastAPI)로 띄울 때는 backend별 make 타깃을 쓰면 artifact path·precision·
+CUDA 로더 경로가 한 번에 설정된다.
+
+```bash
+make serve-onnx-cuda        # fp32 ONNX
+make serve-onnx-cuda-fp16   # fp16 ONNX (onnx-export-fp16 먼저)
+make serve-ort-trt          # ort-trt (fp16)
+make serve-tensorrt         # native TensorRT (trt-build 먼저)
+```
+
+또는 직접 artifact path와 backend를 지정한다.
 
 ```bash
 INFERENCE_BACKEND=onnx-cuda \

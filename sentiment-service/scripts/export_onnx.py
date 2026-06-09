@@ -13,6 +13,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", default="artifacts/model.onnx")
     parser.add_argument("--max-length", type=int, default=512)
     parser.add_argument("--opset", type=int, default=17)
+    parser.add_argument(
+        "--fp16",
+        action="store_true",
+        help="Convert the exported graph to float16 (internal compute fp16, "
+        "int inputs and fp32 logits kept via keep_io_types).",
+    )
     return parser.parse_args()
 
 
@@ -57,6 +63,17 @@ def main() -> None:
         do_constant_folding=True,
     )
     print(f"Exported ONNX model to {output}")
+
+    if args.fp16:
+        import onnx
+        from onnxconverter_common import float16
+
+        # keep_io_types keeps the int64 inputs and fp32 logits at the graph
+        # boundary; only the internal float ops run in fp16 (Tensor Cores).
+        model_fp32 = onnx.load(str(output))
+        model_fp16 = float16.convert_float_to_float16(model_fp32, keep_io_types=True)
+        onnx.save(model_fp16, str(output))
+        print(f"Converted ONNX model to float16 at {output}")
 
 
 if __name__ == "__main__":

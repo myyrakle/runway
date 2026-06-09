@@ -49,6 +49,9 @@ class DeBERTaABSA:
                 self.device = "cuda"
             else:
                 self.device = DEVICE
+            # ONNX Runtime takes CPU numpy and handles the host->device copy
+            # itself; only the native TensorRT runner needs CUDA input tensors.
+            self._inputs_to_cuda = self.backend == "tensorrt"
             self.model = self._load_accelerated_runner()
             self.pad_to_multiple_of = self._resolve_pad_to_multiple_of()
             print(
@@ -76,6 +79,7 @@ class DeBERTaABSA:
             self.device = DEVICE
             model = model.to(self.device)
 
+        self._inputs_to_cuda = self.device == "cuda"
         self.model = model
         self.pad_to_multiple_of = self._resolve_pad_to_multiple_of()
         print(f"[Model] Loaded precision={precision} backend=pytorch on {self.device}")
@@ -127,9 +131,11 @@ class DeBERTaABSA:
             kwargs["pad_to_multiple_of"] = pad_to_multiple_of
 
         inputs = self.tokenizer(texts, aspects, **kwargs)
-        if self.device == "cuda":
-            return {k: v.to(self.device, non_blocking=True) for k, v in inputs.items()}
-        return {k: v.to(self.device) for k, v in inputs.items()}
+        # ONNX backends keep inputs on CPU (the runner feeds numpy) to avoid a
+        # wasteful host<->device round trip; pytorch/tensorrt need CUDA tensors.
+        if getattr(self, "_inputs_to_cuda", self.device == "cuda"):
+            return {k: v.to("cuda", non_blocking=True) for k, v in inputs.items()}
+        return {k: v.to("cpu") for k, v in inputs.items()}
 
     def analyze(self, text: str, aspect: str = "overall") -> dict:
         """Single-text sentiment analysis."""
