@@ -8,6 +8,7 @@ SageMaker용 Dockerfile은 이 디렉터리에서 관리한다. 빌드 컨텍스
 | Dockerfile | Image tag | Runtime | Precision policy |
 |------------|-----------|---------|------------------|
 | `docker/Dockerfile.sagemaker-cpu` | `sentiment-service:cpu` | PyTorch CPU wheel | 기본 `fp32` |
+| `docker/Dockerfile.sagemaker-cpu-int8` | `sentiment-service:cpu-int8` | PyTorch CPU wheel | `DEFAULT_PRECISION=int8`, `ALLOWED_PRECISIONS=int8` |
 | `docker/Dockerfile.sagemaker-cu128-fp32` | `sentiment-service:cu128-fp32` | PyTorch CUDA 12.8 wheel | `DEFAULT_PRECISION=fp32`, `ALLOWED_PRECISIONS=fp32` |
 | `docker/Dockerfile.sagemaker-cu128-fp16` | `sentiment-service:cu128-fp16` | PyTorch CUDA 12.8 wheel | `DEFAULT_PRECISION=fp16`, `ALLOWED_PRECISIONS=fp16` |
 
@@ -15,6 +16,7 @@ SageMaker용 Dockerfile은 이 디렉터리에서 관리한다. 빌드 컨텍스
 
 ```bash
 docker build -f docker/Dockerfile.sagemaker-cpu -t sentiment-service:cpu .
+docker build -f docker/Dockerfile.sagemaker-cpu-int8 -t sentiment-service:cpu-int8 .
 docker build -f docker/Dockerfile.sagemaker-cu128-fp32 -t sentiment-service:cu128-fp32 .
 docker build -f docker/Dockerfile.sagemaker-cu128-fp16 -t sentiment-service:cu128-fp16 .
 ```
@@ -25,6 +27,12 @@ CPU image:
 
 ```bash
 docker run --rm -p 8080:8080 sentiment-service:cpu
+```
+
+CPU int8 image:
+
+```bash
+docker run --rm -p 8080:8080 sentiment-service:cpu-int8
 ```
 
 CUDA fp32 image:
@@ -45,15 +53,21 @@ Each container loads only `DEFAULT_PRECISION` at startup. Requests with a
 precision outside `ALLOWED_PRECISIONS` return 400, which prevents fp32 and fp16
 model copies from being loaded into one process.
 
-For CPU int8 experiments, override the CPU container environment:
+For CPU int8 experiments, prefer the dedicated int8 image. It defaults to
+`INFERENCE_BATCH_SIZE=16`, `OMP_NUM_THREADS=4`, and `MKL_NUM_THREADS=4`.
+Override those values for the instance CPU shape:
 
 ```bash
 docker run --rm -p 8080:8080 \
-  -e ALLOWED_PRECISIONS=fp32,int8 \
-  sentiment-service:cpu
+  -e INFERENCE_BATCH_SIZE=8 \
+  -e OMP_NUM_THREADS=2 \
+  -e MKL_NUM_THREADS=2 \
+  sentiment-service:cpu-int8
 ```
 
-Then request `{"precision": "int8"}` explicitly.
+The generic CPU image can still allow int8 by overriding
+`ALLOWED_PRECISIONS=fp32,int8`, but that can load multiple model variants in one
+process. The dedicated int8 image avoids that.
 
 ## SageMaker
 
@@ -75,5 +89,6 @@ and `texts` for a batch. SageMaker-style `instances` batch payloads use the same
 Batch inference defaults:
 
 - `INFERENCE_BATCH_SIZE=64`: maximum items per model forward pass.
+- `MAX_BATCH_TOKENS=0`: disabled by default; set a positive approximate padded-token budget per model forward.
 - `SORT_BATCH_BY_LENGTH=1`: sort request items by approximate length before chunking, then restore response order.
 - `PAD_TO_MULTIPLE_OF=0`: auto mode; CUDA fp16 uses tokenizer `pad_to_multiple_of=8`.

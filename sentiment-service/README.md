@@ -67,6 +67,7 @@ PY
 | `MAX_LENGTH` | `512` | 토큰 truncation 길이 |
 | `MAX_BATCH_ITEMS` | `1024` | `/analyze/batch`, `/invocations` 배치 요청의 최대 텍스트 수 |
 | `INFERENCE_BATCH_SIZE` | `64` | 한 번의 model forward에 넣는 내부 추론 청크 크기 |
+| `MAX_BATCH_TOKENS` | `0` | 한 번의 model forward에 넣을 approximate padded token 예산. `0`이면 비활성화 |
 | `SORT_BATCH_BY_LENGTH` | `1` | 배치를 길이순으로 묶어 chunk 내 padding 낭비 감소 |
 | `PAD_TO_MULTIPLE_OF` | `0` | tokenizer padding 배수. `0`이면 CUDA fp16에서 자동으로 `8` 사용 |
 | `DEFAULT_PRECISION` | `fp32` | startup에 로드할 precision |
@@ -93,6 +94,8 @@ GPU/CPU 메모리를 한 번에 밀어붙이지 않도록 하기 위한 안전�
 GPU fp16 배치에서는 기본적으로 tokenizer padding을 8의 배수로 맞춰 Tensor Core
 친화적인 shape를 만들고, batch item을 길이순으로 chunking해서 dynamic padding
 낭비를 줄인다. 응답 순서는 입력 순서대로 복원된다.
+`MAX_BATCH_TOKENS`를 양수로 설정하면 개수 기준 `INFERENCE_BATCH_SIZE`와 함께
+대략적인 padded token 예산도 넘지 않도록 chunk를 더 작게 나눈다.
 
 ### 배치 크기 가이드
 
@@ -112,6 +115,7 @@ T4 fp16 로컬 실행 예:
 DEFAULT_PRECISION=fp16 \
 ALLOWED_PRECISIONS=fp16 \
 INFERENCE_BATCH_SIZE=32 \
+MAX_BATCH_TOKENS=16384 \
 SORT_BATCH_BY_LENGTH=1 \
 uv run uvicorn app.main:app --host 0.0.0.0 --port 8001
 ```
@@ -128,6 +132,21 @@ curl -X POST localhost:8001/invocations \
 줄지 않거나 OOM/latency 급증이 생기면 직전 값을 사용한다. `/benchmark`는 같은
 텍스트를 반복하므로 `sample/texts.json`의 실제 길이 분포를 완전히 대변하지
 않는다.
+
+CPU int8 모드는 GPU가 없을 때의 fallback 성격이다. dedicated Dockerfile은
+`DEFAULT_PRECISION=int8`, `ALLOWED_PRECISIONS=int8`, `INFERENCE_BATCH_SIZE=16`,
+`OMP_NUM_THREADS=4`, `MKL_NUM_THREADS=4`를 기본값으로 둔다. 로컬 `uv` 실행도 CPU
+코어 수에 맞춰 thread 값을 명시하는 편이 좋다.
+
+```bash
+OMP_NUM_THREADS=4 \
+MKL_NUM_THREADS=4 \
+DEFAULT_PRECISION=int8 \
+ALLOWED_PRECISIONS=int8 \
+INFERENCE_BATCH_SIZE=16 \
+MAX_BATCH_TOKENS=4096 \
+uv run uvicorn app.main:app --host 0.0.0.0 --port 8001
+```
 
 ```bash
 curl -X POST localhost:8001/analyze \

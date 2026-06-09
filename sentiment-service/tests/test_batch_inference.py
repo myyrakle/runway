@@ -41,8 +41,10 @@ class BatchInferenceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.original_batch_size = getattr(model_module, "INFERENCE_BATCH_SIZE", None)
         self.original_sort = getattr(model_module, "SORT_BATCH_BY_LENGTH", None)
+        self.original_max_batch_tokens = getattr(model_module, "MAX_BATCH_TOKENS", None)
         model_module.INFERENCE_BATCH_SIZE = 2
         model_module.SORT_BATCH_BY_LENGTH = False
+        model_module.MAX_BATCH_TOKENS = 0
 
     def tearDown(self) -> None:
         if self.original_batch_size is None:
@@ -53,6 +55,10 @@ class BatchInferenceTests(unittest.TestCase):
             delattr(model_module, "SORT_BATCH_BY_LENGTH")
         else:
             model_module.SORT_BATCH_BY_LENGTH = self.original_sort
+        if self.original_max_batch_tokens is None:
+            delattr(model_module, "MAX_BATCH_TOKENS")
+        else:
+            model_module.MAX_BATCH_TOKENS = self.original_max_batch_tokens
 
     def _fake_absa(self) -> DeBERTaABSA:
         absa = object.__new__(DeBERTaABSA)
@@ -79,6 +85,16 @@ class BatchInferenceTests(unittest.TestCase):
 
         self.assertEqual(len(results), 4)
         self.assertEqual(absa.tokenizer.calls, [["b", "dd"], ["aaaa", "cccccc"]])
+
+    def test_analyze_batch_respects_max_batch_tokens(self) -> None:
+        model_module.INFERENCE_BATCH_SIZE = 10
+        model_module.MAX_BATCH_TOKENS = 16
+        absa = self._fake_absa()
+
+        results = absa.analyze_batch(["aa", "bbbb", "cc", "dddd"], "x")
+
+        self.assertEqual(len(results), 4)
+        self.assertEqual(absa.tokenizer.calls, [["aa", "bbbb"], ["cc", "dddd"]])
 
     def test_fp16_cuda_tokenization_pads_to_tensor_core_multiple(self) -> None:
         absa = self._fake_absa()

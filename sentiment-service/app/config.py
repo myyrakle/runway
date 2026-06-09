@@ -22,6 +22,10 @@ MAX_BATCH_ITEMS = int(os.environ.get("MAX_BATCH_ITEMS", "1024"))
 # Maximum number of texts sent through one model forward pass.
 INFERENCE_BATCH_SIZE = int(os.environ.get("INFERENCE_BATCH_SIZE", "64"))
 
+# Approximate upper bound for padded tokens per model forward pass. A value <= 0
+# disables token-budget chunking and uses only INFERENCE_BATCH_SIZE.
+MAX_BATCH_TOKENS = int(os.environ.get("MAX_BATCH_TOKENS", "0"))
+
 # Sort large batches by approximate sequence length before chunking. This keeps
 # dynamic padding lower inside each model forward pass while preserving response order.
 SORT_BATCH_BY_LENGTH = os.environ.get("SORT_BATCH_BY_LENGTH", "1").lower() not in {

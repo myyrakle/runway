@@ -11,6 +11,7 @@ from transformers import AutoModelForSequenceClassification, AutoTokenizer
 from app.config import (
     DEVICE,
     INFERENCE_BATCH_SIZE,
+    MAX_BATCH_TOKENS,
     MAX_LENGTH,
     MODEL_NAME,
     NEGATIVE_THRESHOLD,
@@ -116,14 +117,48 @@ class DeBERTaABSA:
             indexed_texts.sort(key=lambda item: len(item[1]) + len(aspect))
 
         ordered_results: list[dict | None] = [None] * len(texts)
-        for start in range(0, len(indexed_texts), INFERENCE_BATCH_SIZE):
-            chunk = indexed_texts[start:start + INFERENCE_BATCH_SIZE]
+        for chunk in self._iter_inference_chunks(indexed_texts, aspect):
             chunk_indices = [index for index, _ in chunk]
             chunk_texts = [text for _, text in chunk]
             chunk_results = self._analyze_batch_chunk(chunk_texts, aspect)
             for index, result in zip(chunk_indices, chunk_results):
                 ordered_results[index] = result
         return [result for result in ordered_results if result is not None]
+
+    def _iter_inference_chunks(
+        self,
+        indexed_texts: list[tuple[int, str]],
+        aspect: str,
+    ):
+        if MAX_BATCH_TOKENS <= 0:
+            for start in range(0, len(indexed_texts), INFERENCE_BATCH_SIZE):
+                yield indexed_texts[start:start + INFERENCE_BATCH_SIZE]
+            return
+
+        chunk: list[tuple[int, str]] = []
+        chunk_max_tokens = 0
+        for item in indexed_texts:
+            item_tokens = self._estimate_sequence_tokens(item[1], aspect)
+            next_max_tokens = max(chunk_max_tokens, item_tokens)
+            next_size = len(chunk) + 1
+            would_exceed_size = next_size > INFERENCE_BATCH_SIZE
+            would_exceed_tokens = next_size * next_max_tokens > MAX_BATCH_TOKENS
+
+            if chunk and (would_exceed_size or would_exceed_tokens):
+                yield chunk
+                chunk = []
+                chunk_max_tokens = 0
+
+            chunk.append(item)
+            chunk_max_tokens = max(chunk_max_tokens, item_tokens)
+
+        if chunk:
+            yield chunk
+
+    def _estimate_sequence_tokens(self, text: str, aspect: str) -> int:
+        # Cheap upper-ish estimate for chunking before tokenizer padding. The
+        # tokenizer still performs exact truncation/padding for the model input.
+        return min(MAX_LENGTH, len(text) + len(aspect) + 3)
 
     def _analyze_batch_chunk(self, texts: list[str], aspect: str) -> list[dict]:
         """Run one bounded model forward pass."""

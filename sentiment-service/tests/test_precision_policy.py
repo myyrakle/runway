@@ -78,5 +78,19 @@ class PrecisionPolicyTests(unittest.TestCase):
             "-t sentiment-service:cpu .",
             docker_readme,
         )
+        self.assertIn(
+            "docker build -f docker/Dockerfile.sagemaker-cpu-int8 "
+            "-t sentiment-service:cpu-int8 .",
+            docker_readme,
+        )
         self.assertIn("DEFAULT_PRECISION=fp16", docker_readme)
         self.assertIn("ALLOWED_PRECISIONS=fp16", docker_readme)
+
+    def test_cpu_int8_dockerfile_sets_int8_and_thread_defaults(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        dockerfile = (root / "docker" / "Dockerfile.sagemaker-cpu-int8").read_text()
+
+        self.assertIn("DEFAULT_PRECISION=int8", dockerfile)
+        self.assertIn("ALLOWED_PRECISIONS=int8", dockerfile)
+        self.assertIn("OMP_NUM_THREADS=4", dockerfile)
+        self.assertIn("MKL_NUM_THREADS=4", dockerfile)
