@@ -31,31 +31,36 @@ def main() -> None:
     model = AutoModelForSequenceClassification.from_pretrained(args.model_name)
     model.eval()
 
-    # Trace at full max_length, not the toy 12-token example. DeBERTa's
-    # disentangled attention builds sequence-length-dependent relative-position
-    # tensors; tracing on a tiny dummy lets constant folding bake those to the
-    # dummy's length, so any longer input silently produces degraded logits
-    # (observed as negatives collapsing toward "positive"). A max_length dummy
-    # makes the folded shapes cover the worst case the runtime can feed.
+    # IMPORTANT: do NOT feed token_type_ids to the export. deberta-v3-base has
+    # type_vocab_size=0, so PyTorch ignores token_type_ids at runtime (fp32/fp16
+    # are correct). But tracing the model WITH a token_type_ids input collapses
+    # the embedding/attention path to a constant in the exported graph, so the
+    # ONNX model ignores its inputs and always predicts the same class (~"positive"
+    # 0.817 here). That single bug also poisons every artifact derived from this
+    # ONNX file (ort-trt, tensorrt). Exporting with only {input_ids, attention_mask}
+    # — exactly what `optimum` does — produces a graph that matches fp32 logits.
+    # The runner (OnnxRuntimeRunner) already filters feeds to the model's declared
+    # inputs, so dropping token_type_ids here needs no runtime change.
     encoded = tokenizer(
         ["The battery life is terrible and the screen is great."],
         ["overall"],
         return_tensors="pt",
         truncation=True,
         max_length=args.max_length,
-        padding="max_length",
+        padding=True,
+        return_token_type_ids=False,
     )
     model_inputs = {
         name: tensor
         for name, tensor in encoded.items()
-        if name in {"input_ids", "attention_mask", "token_type_ids"}
+        if name in {"input_ids", "attention_mask"}
     }
     input_names = list(model_inputs.keys())
 
     # fp16: trace the half model on CUDA so the exported graph is natively fp16
     # and internally consistent. Post-hoc float16 conversion of DeBERTa produces
     # Cast-node type mismatches that ONNX Runtime refuses to load. Integer inputs
-    # (input_ids/token_type_ids/attention_mask) stay integer.
+    # (input_ids/attention_mask) stay integer.
     if args.fp16:
         if not torch.cuda.is_available():
             raise SystemExit("--fp16 ONNX export requires a CUDA device")
@@ -76,11 +81,7 @@ def main() -> None:
         output_names=["logits"],
         dynamic_axes=dynamic_axes,
         opset_version=args.opset,
-        # Keep constant folding OFF: with DeBERTa's relative-position attention
-        # it folds sequence-length-derived constants into the graph, which breaks
-        # any sequence length other than the traced dummy. The minor extra graph
-        # size is cheap; correctness across lengths is not negotiable.
-        do_constant_folding=False,
+        do_constant_folding=True,
     )
     print(f"Exported {'float16 ' if args.fp16 else ''}ONNX model to {output}")
 
