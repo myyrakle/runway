@@ -1,6 +1,8 @@
 """FastAPI app exposing multilingual-e5-large text embeddings.
 
 Endpoints:
+  GET  /ping        SageMaker health check
+  POST /invocations SageMaker inference adapter
   GET  /health
   POST /embed      list of texts -> L2-normalized vectors (precision selectable)
   POST /benchmark  encode latency stats (precision selectable)
@@ -67,6 +69,16 @@ async def health() -> HealthResponse:
         dim=EMBEDDING_DIM,
         loaded_precisions=sorted(_models.keys()),
     )
+
+
+@app.get("/ping")
+async def ping() -> dict[str, str]:
+    return {"status": "ok" if "fp32" in _models else "loading"}
+
+
+@app.post("/invocations", response_model=EmbedResponse)
+async def invocations(req: EmbedRequest) -> EmbedResponse:
+    return await embed(req)
 
 
 @app.post("/embed", response_model=EmbedResponse)

@@ -1,6 +1,8 @@
 """FastAPI app exposing DeBERTa ABSA sentiment analysis.
 
 Endpoints:
+  GET  /ping          SageMaker health check
+  POST /invocations   SageMaker inference adapter (single or batch)
   GET  /health
   POST /analyze        single text   (precision variant selectable)
   POST /analyze/batch  list of texts (precision variant selectable)
@@ -68,6 +70,20 @@ async def health() -> HealthResponse:
         device=DEVICE,
         loaded_precisions=sorted(_models.keys()),
     )
+
+
+@app.get("/ping")
+async def ping() -> dict[str, str]:
+    return {"status": "ok" if "fp32" in _models else "loading"}
+
+
+@app.post("/invocations", response_model=SentimentResult | BatchAnalyzeResponse)
+async def invocations(
+    req: AnalyzeRequest | BatchAnalyzeRequest,
+) -> SentimentResult | BatchAnalyzeResponse:
+    if isinstance(req, BatchAnalyzeRequest):
+        return await analyze_batch(req)
+    return await analyze(req)
 
 
 @app.post("/analyze", response_model=SentimentResult)
