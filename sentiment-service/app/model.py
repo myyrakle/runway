@@ -5,6 +5,8 @@ Supports precision variants: fp32 (default), fp16 (CUDA), int8 (dynamic quant, C
 """
 from __future__ import annotations
 
+import os
+
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
 
@@ -256,7 +258,17 @@ class OnnxRuntimeRunner:
                 "Install with `uv sync --extra onnx`."
             ) from exc
 
-        self.session = ort.InferenceSession(model_path, providers=providers)
+        sess_options = ort.SessionOptions()
+        sess_options.graph_optimization_level = (
+            ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        )
+        # DeBERTa's disentangled attention forces some ops onto the CPU EP, so ORT
+        # logs a Memcpy/constant-fold warning per node. They are informational and
+        # very noisy; keep errors only. Set ORT_LOG_SEVERITY=1 to see them again.
+        sess_options.log_severity_level = int(os.environ.get("ORT_LOG_SEVERITY", "3"))
+        self.session = ort.InferenceSession(
+            model_path, sess_options=sess_options, providers=providers
+        )
         self.input_names = {input_meta.name for input_meta in self.session.get_inputs()}
 
     def __call__(self, **inputs):
