@@ -266,7 +266,8 @@ class OnnxRuntimeRunner:
             if name in self.input_names
         }
         logits = self.session.run(["logits"], ort_inputs)[0]
-        return torch.from_numpy(logits)
+        # fp16 graphs return fp16 logits; upcast so the CPU softmax downstream is safe.
+        return torch.from_numpy(logits).float()
 
 
 class TensorRTRunner:

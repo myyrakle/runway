@@ -174,10 +174,12 @@ make trt-sample             # native TensorRT (fp16)
 
 > onnx-cuda 백엔드는 ONNX 그래프 자체의 정밀도를 그대로 실행한다. fp32 ONNX를
 > `--precision fp16`으로 돌려도 실제 연산은 fp32다. fp16 이득을 보려면
-> `onnx-export-fp16`으로 변환한 그래프(`onnxconverter_common.float16`,
-> `keep_io_types`로 int 입력·fp32 logits 유지)를 써야 한다. 반면 `ort-trt`와
-> native `tensorrt`는 엔진 빌드 시 fp16을 켜므로 fp32 ONNX에서 출발해도 fp16으로
-> 실행된다. fp16 변환은 정밀도 손실이 생길 수 있으니 `sample/`로 정확도를 확인한다.
+> `onnx-export-fp16`으로 만든 그래프를 써야 한다. 이 export는 `model.half()`를
+> CUDA에서 추적해 네이티브 fp16 그래프를 만들므로 GPU가 필요하다(정수 입력은 그대로
+> 유지). 후처리 float16 변환은 DeBERTa에서 Cast 노드 타입 불일치를 만들어 ONNX
+> Runtime이 로드를 거부해서 쓰지 않는다. 반면 `ort-trt`와 native `tensorrt`는 엔진
+> 빌드 시 fp16을 켜므로 fp32 ONNX에서 출발해도 fp16으로 실행된다. fp16은 정밀도
+> 손실이 생길 수 있으니 `sample/`로 정확도를 확인한다.
 
 서비스(FastAPI)로 띄울 때는 backend별 make 타깃을 쓰면 artifact path·precision·
 CUDA 로더 경로가 한 번에 설정된다.

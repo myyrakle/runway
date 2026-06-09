@@ -16,8 +16,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--fp16",
         action="store_true",
-        help="Convert the exported graph to float16 (internal compute fp16, "
-        "int inputs and fp32 logits kept via keep_io_types).",
+        help="Export a float16 graph by tracing model.half() on CUDA (int inputs "
+        "stay int; float weights/activations run in fp16). Requires a GPU.",
     )
     return parser.parse_args()
 
@@ -46,6 +46,16 @@ def main() -> None:
     }
     input_names = list(model_inputs.keys())
 
+    # fp16: trace the half model on CUDA so the exported graph is natively fp16
+    # and internally consistent. Post-hoc float16 conversion of DeBERTa produces
+    # Cast-node type mismatches that ONNX Runtime refuses to load. Integer inputs
+    # (input_ids/token_type_ids/attention_mask) stay integer.
+    if args.fp16:
+        if not torch.cuda.is_available():
+            raise SystemExit("--fp16 ONNX export requires a CUDA device")
+        model = model.half().to("cuda")
+        model_inputs = {name: tensor.to("cuda") for name, tensor in model_inputs.items()}
+
     dynamic_axes = {
         name: {0: "batch", 1: "sequence"}
         for name in input_names
@@ -62,18 +72,7 @@ def main() -> None:
         opset_version=args.opset,
         do_constant_folding=True,
     )
-    print(f"Exported ONNX model to {output}")
-
-    if args.fp16:
-        import onnx
-        from onnxconverter_common import float16
-
-        # keep_io_types keeps the int64 inputs and fp32 logits at the graph
-        # boundary; only the internal float ops run in fp16 (Tensor Cores).
-        model_fp32 = onnx.load(str(output))
-        model_fp16 = float16.convert_float_to_float16(model_fp32, keep_io_types=True)
-        onnx.save(model_fp16, str(output))
-        print(f"Converted ONNX model to float16 at {output}")
+    print(f"Exported {'float16 ' if args.fp16 else ''}ONNX model to {output}")
 
 
 if __name__ == "__main__":
