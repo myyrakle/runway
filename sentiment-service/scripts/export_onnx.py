@@ -31,13 +31,19 @@ def main() -> None:
     model = AutoModelForSequenceClassification.from_pretrained(args.model_name)
     model.eval()
 
+    # Trace at full max_length, not the toy 12-token example. DeBERTa's
+    # disentangled attention builds sequence-length-dependent relative-position
+    # tensors; tracing on a tiny dummy lets constant folding bake those to the
+    # dummy's length, so any longer input silently produces degraded logits
+    # (observed as negatives collapsing toward "positive"). A max_length dummy
+    # makes the folded shapes cover the worst case the runtime can feed.
     encoded = tokenizer(
         ["The battery life is terrible and the screen is great."],
         ["overall"],
         return_tensors="pt",
         truncation=True,
         max_length=args.max_length,
-        padding=True,
+        padding="max_length",
     )
     model_inputs = {
         name: tensor
@@ -70,7 +76,11 @@ def main() -> None:
         output_names=["logits"],
         dynamic_axes=dynamic_axes,
         opset_version=args.opset,
-        do_constant_folding=True,
+        # Keep constant folding OFF: with DeBERTa's relative-position attention
+        # it folds sequence-length-derived constants into the graph, which breaks
+        # any sequence length other than the traced dummy. The minor extra graph
+        # size is cheap; correctness across lengths is not negotiable.
+        do_constant_folding=False,
     )
     print(f"Exported {'float16 ' if args.fp16 else ''}ONNX model to {output}")
 
