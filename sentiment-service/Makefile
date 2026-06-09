@@ -15,10 +15,12 @@ ORT_TRT_CACHE ?= artifacts/ort_trt_cache
 SAMPLE_TEXTS ?= sample/texts.json
 
 # torch's cu128 wheel bundles the CUDA runtime as nvidia-* site-packages
-# (libcusparseLt.so.0 etc.). Point the dynamic loader at them so `import torch`
-# works without a system CUDA install. Resolved in the recipe shell so it sees
-# .venv after `uv sync`; run `uv sync` (or `uv sync --extra onnx/tensorrt`) first.
-WITH_CUDA = LD_LIBRARY_PATH="$$(ls -d $(VENV)/lib/python*/site-packages/nvidia/*/lib 2>/dev/null | tr '\n' ':')$$LD_LIBRARY_PATH"
+# (libcusparseLt.so.0 etc.), and tensorrt-cu12 ships libnvinfer in tensorrt_libs/.
+# Point the dynamic loader at both so `import torch` and the ort-trt EP (which
+# dlopens libnvinfer) work without a system CUDA/TensorRT install. Resolved in the
+# recipe shell so it sees .venv after `uv sync`; run `uv sync --extra onnx`
+# (or `--extra tensorrt`) first.
+WITH_CUDA = LD_LIBRARY_PATH="$$(ls -d $(VENV)/lib/python*/site-packages/nvidia/*/lib $(VENV)/lib/python*/site-packages/tensorrt_libs 2>/dev/null | tr '\n' ':')$$LD_LIBRARY_PATH"
 
 .PHONY: serve-fp16 serve-onnx-cuda serve-ort-trt serve-tensorrt
 .PHONY: onnx-export onnx-export-fp16 onnx-cuda-sample ort-trt-sample trt-build trt-sample
