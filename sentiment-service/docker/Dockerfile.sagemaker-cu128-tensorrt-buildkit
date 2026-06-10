@@ -1,4 +1,4 @@
-# syntax=docker/dockerfile:1.14
+# syntax=docker/dockerfile:1-labs
 # BuildKit variant of Dockerfile.sagemaker-cu128-tensorrt.
 #
 # Same multi-stage layout and runtime as the legacy file; the ONLY difference is HOW
