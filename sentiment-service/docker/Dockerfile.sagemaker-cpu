@@ -24,6 +24,16 @@ RUN if [ "$PRELOAD_MODEL" = "1" ]; then \
       python -c "import os; from transformers import AutoModelForSequenceClassification, AutoTokenizer; model_name = os.environ['MODEL_NAME']; AutoTokenizer.from_pretrained(model_name); AutoModelForSequenceClassification.from_pretrained(model_name)"; \
     fi
 
+# Runtime is fully offline. PRELOAD_MODEL baked the model + tokenizer into the HF
+# cache above, so force transformers/hub to read ONLY that cache and never reach
+# huggingface.co. Without this, from_pretrained() still does a HEAD/etag request
+# to the Hub on every startup — adding latency, and stalling/failing the container
+# whenever the Hub is down or egress is blocked. Must stay AFTER the preload step
+# (that step needs the network). Override with `-e HF_HUB_OFFLINE=0` if you built
+# with PRELOAD_MODEL=0 and intend to download at runtime.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
+
 RUN printf '#!/bin/sh\nexec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}\n' > /usr/local/bin/serve \
     && chmod +x /usr/local/bin/serve
 

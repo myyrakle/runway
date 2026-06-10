@@ -35,6 +35,18 @@ RUN if [ "$EXPORT_ONNX" = "1" ]; then \
       python scripts/export_onnx.py --model-name "$MODEL_NAME" --output "$ONNX_MODEL_PATH"; \
     fi
 
+# Runtime is fully offline. export_onnx.py above baked the tokenizer (and model
+# weights it traced from) into the HF cache, so force transformers/hub to read ONLY
+# that cache and never reach huggingface.co. At runtime this backend loads the local
+# .onnx + tokenizer from cache (the TRT engine is built locally into ORT_TRT_CACHE_PATH
+# on first request); without these flags AutoTokenizer.from_pretrained() still does a
+# HEAD/etag request to the Hub on startup — adding latency, and stalling/failing the
+# container whenever the Hub is down or egress is blocked. Must stay AFTER the export
+# step (it needs the network). Override with `-e HF_HUB_OFFLINE=0` if you built with
+# EXPORT_ONNX=0.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
+
 RUN printf '#!/bin/sh\nexec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}\n' > /usr/local/bin/serve \
     && chmod +x /usr/local/bin/serve
 
