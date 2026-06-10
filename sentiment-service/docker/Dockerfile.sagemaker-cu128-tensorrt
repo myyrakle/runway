@@ -104,7 +104,7 @@ RUN python -m pip install --no-cache-dir -e . \
 RUN python -c "import glob,os,site; dirs=[p for r in (site.getsitepackages()+[site.getusersitepackages()]) for p in glob.glob(os.path.join(r,'nvidia','*','lib'))+glob.glob(os.path.join(r,'tensorrt_libs'))]; open('/etc/ld.so.conf.d/cuda-trt-libs.conf','w').write('\n'.join(dirs)+'\n')" \
     && ldconfig \
     && SP="$(python -c 'import site;print(site.getsitepackages()[0])')" \
-    && rm -rf "$SP"/nvidia/nccl "$SP"/triton "$SP"/torch/include "$SP"/torch/test \
+    && rm -rf "$SP"/triton "$SP"/torch/include "$SP"/torch/test \
     && python -c "import torch, tensorrt; print('torch', torch.__version__, 'trt', tensorrt.__version__)"
 
 # The engine + the tokenizer cache (for offline AutoTokenizer.from_pretrained) are the
