@@ -22,11 +22,13 @@ ENV PYTHONUNBUFFERED=1 \
 # time guard that fails the build if a removed lib turns out to be required.
 #   triton: torch.compile (pure-python JIT, never linked)
 #   nccl:   torch.distributed multi-GPU collectives (dlopen, single-GPU never hits)
-#   cupti:  profiler/kineto (dlopen on demand)
+# NB: cupti is NOT removable here — libtorch_cuda.so links libcupti.so.12 as
+# DT_NEEDED in this 2.8.0+cu128 build, so dropping nvidia/cuda_cupti makes
+# `import torch` fail at load (the guard below catches it).
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128 \
     && SP="$(python -c 'import site;print(site.getsitepackages()[0])')" \
-    && rm -rf "$SP"/nvidia/nccl "$SP"/nvidia/cuda_cupti \
+    && rm -rf "$SP"/nvidia/nccl \
               "$SP"/triton "$SP"/torch/include "$SP"/torch/test \
     && python -c "import torch; print('torch', torch.__version__, 'cuda-build', torch.version.cuda)"
 
