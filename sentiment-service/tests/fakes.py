@@ -44,6 +44,9 @@ class FakeTensor:
     def cpu(self):
         return self
 
+    def tolist(self):
+        return self.data
+
 
 class FakeInferenceMode:
     def __enter__(self):

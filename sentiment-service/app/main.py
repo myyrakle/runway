@@ -118,13 +118,23 @@ def _require_batch(texts) -> list:
     return texts
 
 
+async def _resolve_model(precision: str) -> DeBERTaABSA:
+    # Hot path: an already-loaded variant is a plain dict hit, so resolve it on the
+    # event loop and skip the threadpool round trip. Only a cold (lazy-load) variant
+    # is offloaded, since constructing the model blocks.
+    cached = _models.get(precision)
+    if cached is not None:
+        return cached
+    return await run_in_threadpool(_get_variant, precision)
+
+
 async def _run_single(text: str, aspect: str, precision: str) -> dict:
-    model = await run_in_threadpool(_get_variant, precision)
+    model = await _resolve_model(precision)
     return await run_in_threadpool(model.analyze, text, aspect)
 
 
 async def _run_batch(texts: list[str], aspect: str, precision: str) -> dict:
-    model = await run_in_threadpool(_get_variant, precision)
+    model = await _resolve_model(precision)
     results = await run_in_threadpool(model.analyze_batch, texts, aspect)
     return {"results": results}
 

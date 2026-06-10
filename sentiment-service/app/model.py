@@ -142,29 +142,8 @@ class DeBERTaABSA:
         return {k: v.to("cpu") for k, v in inputs.items()}
 
     def analyze(self, text: str, aspect: str = "overall") -> dict:
-        """Single-text sentiment analysis."""
-        inputs = self._tokenize(text, aspect)
-
-        with torch.inference_mode():
-            outputs = self.model(**inputs)
-            logits = outputs.logits if hasattr(outputs, "logits") else outputs
-            probs = torch.softmax(logits, dim=-1).detach().cpu()
-            pred_label = torch.argmax(probs, dim=-1).item()
-            confidence = probs[0][pred_label].item()
-
-        sentiment = self.label_map[pred_label]
-        is_negative = pred_label == 0 and confidence >= NEGATIVE_THRESHOLD
-
-        return {
-            "sentiment": sentiment,
-            "confidence": confidence,
-            "is_negative": is_negative,
-            "probs": {
-                "negative": probs[0][0].item(),
-                "neutral": probs[0][1].item(),
-                "positive": probs[0][2].item(),
-            },
-        }
+        """Single-text sentiment analysis (delegates to the batch chunk path)."""
+        return self._analyze_batch_chunk([text], aspect)[0]
 
     def analyze_batch(self, texts: list[str], aspect: str = "overall") -> list[dict]:
         """Batch sentiment analysis."""
@@ -226,25 +205,25 @@ class DeBERTaABSA:
         with torch.inference_mode():
             outputs = self.model(**inputs)
             logits = outputs.logits if hasattr(outputs, "logits") else outputs
-            probs = torch.softmax(logits, dim=-1).detach().cpu()
-            pred_labels = torch.argmax(probs, dim=-1).detach().cpu()
+            probs = torch.softmax(logits, dim=-1)
 
+        # One bulk device->host copy + C-level conversion to plain Python floats,
+        # instead of ~5 per-row `.item()` boundary crossings (5k+ calls at batch=1k).
+        # argmax is then a trivial 3-way scan over the already-host floats.
+        probs_list = probs.to("cpu").tolist()
+
+        label_map = self.label_map
+        threshold = NEGATIVE_THRESHOLD
         results = []
-        for label, prob in zip(pred_labels, probs):
-            label_idx = label.item()
-            confidence = prob[label_idx].item()
-            sentiment = self.label_map[label_idx]
-            is_negative = label_idx == 0 and confidence >= NEGATIVE_THRESHOLD
-
+        for prob in probs_list:
+            neg, neu, pos = prob
+            label_idx = prob.index(max(prob))  # first-max index, matches argmax
+            confidence = prob[label_idx]
             results.append({
-                "sentiment": sentiment,
+                "sentiment": label_map[label_idx],
                 "confidence": confidence,
-                "is_negative": is_negative,
-                "probs": {
-                    "negative": prob[0].item(),
-                    "neutral": prob[1].item(),
-                    "positive": prob[2].item(),
-                },
+                "is_negative": label_idx == 0 and confidence >= threshold,
+                "probs": {"negative": neg, "neutral": neu, "positive": pos},
             })
 
         return results
