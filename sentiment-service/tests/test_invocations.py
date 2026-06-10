@@ -59,15 +59,6 @@ class InvocationTests(unittest.TestCase):
         self.assertEqual(self.model.batch_calls, [(["a", "b"], "battery")])
         self.assertEqual(self.model.single_calls, [])
 
-    def test_invocations_single_text_uses_single_inference_path(self) -> None:
-        result = asyncio.run(
-            main_module._dispatch_invocation({"text": "a", "aspect": "battery"})
-        )
-
-        self.assertEqual(result["sentiment"], "positive")
-        self.assertEqual(self.model.single_calls, [("a", "battery")])
-        self.assertEqual(self.model.batch_calls, [])
-
     def test_invocations_instances_payload_uses_batch_inference_path(self) -> None:
         result = asyncio.run(
             main_module._dispatch_invocation(
@@ -79,18 +70,16 @@ class InvocationTests(unittest.TestCase):
         self.assertEqual(self.model.batch_calls, [(["a", "b", "c"], "screen")])
         self.assertEqual(self.model.single_calls, [])
 
-    def test_invocations_requires_exactly_one_payload_field(self) -> None:
+    def test_invocations_is_batch_only(self) -> None:
+        # No texts/instances list -> rejected. A bare single `text` is no longer
+        # a valid /invocations payload; callers must send a batch.
         from fastapi import HTTPException
 
-        for body in ({}, {"text": "a", "texts": ["b"]}):
+        for body in ({}, {"text": "a"}, {"texts": []}):
             with self.assertRaises(HTTPException):
                 asyncio.run(main_module._dispatch_invocation(body))
-
-    def test_invocations_rejects_empty_batch(self) -> None:
-        from fastapi import HTTPException
-
-        with self.assertRaises(HTTPException):
-            asyncio.run(main_module._dispatch_invocation({"texts": []}))
+        self.assertEqual(self.model.batch_calls, [])
+        self.assertEqual(self.model.single_calls, [])
 
     def test_invocation_schema_documents_texts_for_batch(self) -> None:
         schema = InvocationRequest.model_json_schema()

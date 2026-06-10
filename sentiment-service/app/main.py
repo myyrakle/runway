@@ -2,7 +2,7 @@
 
 Endpoints:
   GET  /ping          SageMaker health check
-  POST /invocations   SageMaker inference adapter (single or batch)
+  POST /invocations   SageMaker inference adapter (batch: texts / instances)
   GET  /health
   POST /analyze        single text   (precision variant selectable)
   POST /analyze/batch  list of texts (precision variant selectable)
@@ -130,23 +130,12 @@ async def _run_batch(texts: list[str], aspect: str, precision: str) -> dict:
 
 
 async def _dispatch_invocation(body: dict) -> dict:
-    """Route a raw /invocations payload to the single or batch inference path."""
+    """/invocations is batch-only: accept `texts` (or its `instances` alias)."""
     if not isinstance(body, dict):
         raise HTTPException(status_code=400, detail="Request body must be a JSON object")
-    text = body.get("text")
     texts = body.get("texts")
-    instances = body.get("instances")
-    if sum(value is not None for value in (text, texts, instances)) != 1:
-        raise HTTPException(
-            status_code=400,
-            detail="Provide exactly one of text, texts, or instances",
-        )
+    batch = _require_batch(texts if texts is not None else body.get("instances"))
     aspect, precision = _aspect_precision(body)
-    if text is not None:
-        if not isinstance(text, str):
-            raise HTTPException(status_code=400, detail="text must be a string")
-        return await _run_single(text, aspect, precision)
-    batch = _require_batch(texts if texts is not None else instances)
     return await _run_batch(batch, aspect, precision)
 
 
