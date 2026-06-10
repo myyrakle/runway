@@ -61,8 +61,17 @@ ARG BUILD_ENGINE=1
 # is not injected and trt.Builder() dies with CUDA error 35. Exports fp32 ONNX, lets TRT
 # do the fp16 conversion (--fp16), and warms the HF cache with the tokenizer the runtime
 # loads offline. The .onnx is a pure build intermediate and never leaves this stage.
+# CDI injects the driver device nodes (/dev/nvidia*) AND the host driver libs, but the
+# CDI ldconfig hook does NOT run in the build context, so libcuda.so/libnvidia-ml.so
+# land on disk without being registered in the loader cache -> trt.Builder() dies with
+# CUDA error 35. Re-run ldconfig here (picks up the CDI-mounted libs in the default
+# dirs) and add their dirs to LD_LIBRARY_PATH as a belt-and-suspenders for non-standard
+# mount locations. Both only take effect inside THIS --device RUN, which is correct:
+# the driver libs are bind-mounted only for this step and never reach the image.
 RUN --device=nvidia.com/gpu=all \
     if [ "$BUILD_ENGINE" = "1" ]; then \
+      ldconfig && \
+      export LD_LIBRARY_PATH="$(dirname "$(find / -name 'libcuda.so*' 2>/dev/null | head -n1)"):$(dirname "$(find / -name 'libnvidia-ml.so*' 2>/dev/null | head -n1)"):${LD_LIBRARY_PATH}" && \
       python scripts/export_onnx.py --model-name "$MODEL_NAME" --output "$ONNX_MODEL_PATH" && \
       python scripts/build_trt_engine.py --onnx "$ONNX_MODEL_PATH" --output "$TRT_ENGINE_PATH" --opt-batch "$INFERENCE_BATCH_SIZE" --max-batch "$INFERENCE_BATCH_SIZE" --max-seq 512 --fp16 && \
       rm -f "$ONNX_MODEL_PATH"; \
