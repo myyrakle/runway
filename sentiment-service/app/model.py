@@ -6,6 +6,7 @@ Supports precision variants: fp32 (default), fp16 (CUDA), int8 (dynamic quant, C
 from __future__ import annotations
 
 import os
+import threading
 
 import torch
 from transformers import AutoModelForSequenceClassification, AutoTokenizer
@@ -318,23 +319,42 @@ class TensorRTRunner:
         # One captured graph per distinct input-shape signature. A shape that fails
         # to capture is marked None so we fall back to eager for it without retrying.
         self._graphs: dict[tuple, "_CapturedGraph | None"] = {}
+        # A TensorRT IExecutionContext is NOT thread-safe, and the shape/address/
+        # output caches + captured graphs below are shared mutable state. FastAPI
+        # serves /invocations via run_in_threadpool, whose anyio pool has many
+        # workers, so concurrent requests would otherwise call set_input_shape /
+        # set_tensor_address / execute_async_v3 on this one context at the same
+        # time — which corrupts it and surfaces as the Myelin "Called with an
+        # already loaded binary graph" error / execute_async_v3 failures. This lock
+        # serializes the whole forward so only one worker drives the context at once.
+        self._lock = threading.Lock()
         if cuda_graph:
             print("[Model] TensorRT CUDA graph capture enabled (per input shape)")
 
     def __call__(self, **inputs):
         contiguous = {name: inputs[name].contiguous() for name in self.input_names}
-        if self.cuda_graph:
-            key = tuple((name, tuple(contiguous[name].shape)) for name in self.input_names)
-            entry = self._graphs.get(key, "missing")
-            if entry == "missing":
-                entry = self._capture(contiguous)
-                self._graphs[key] = entry
-            if entry is not None:
-                for name in self.input_names:
-                    entry.static_inputs[name].copy_(contiguous[name])
-                entry.graph.replay()
-                return entry.static_output
-        return self._run_eager(contiguous)
+        with self._lock:
+            if self.cuda_graph:
+                key = tuple((name, tuple(contiguous[name].shape)) for name in self.input_names)
+                entry = self._graphs.get(key, "missing")
+                if entry == "missing":
+                    entry = self._capture(contiguous)
+                    self._graphs[key] = entry
+                if entry is not None:
+                    for name in self.input_names:
+                        entry.static_inputs[name].copy_(contiguous[name])
+                    entry.graph.replay()
+                    return self._detach_output(entry.static_output)
+            return self._detach_output(self._run_eager(contiguous))
+
+    def _detach_output(self, logits):
+        # _run_eager's _output_cache and the captured graphs' static_output are
+        # reused across calls. Sync (so the work just submitted on the stream is
+        # complete) and return an independent copy while still holding self._lock,
+        # so once the lock is released the next worker can reuse the shared output
+        # buffer without clobbering this caller's result before it is read.
+        torch.cuda.current_stream().synchronize()
+        return logits.clone()
 
     def _bind_shapes(self, contiguous):
         context = self.context
