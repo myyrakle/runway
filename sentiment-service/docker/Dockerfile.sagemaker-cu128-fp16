@@ -9,12 +9,24 @@ ENV PYTHONUNBUFFERED=1 \
     DEFAULT_PRECISION=fp16 \
     ALLOWED_PRECISIONS=fp16
 
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends build-essential curl \
-    && rm -rf /var/lib/apt/lists/*
+# No build toolchain: every dep (torch/transformers/sentencepiece/safetensors)
+# ships a manylinux wheel, so `pip install -e .` needs no compiler. python:3.10-slim
+# already carries ca-certificates for the https wheel downloads.
 
+# torch cu128 bundles the full CUDA runtime as nvidia-* site-packages (~4GB). A
+# single-GPU eager fp16 transformer forward only touches cuDNN + cuBLAS (+ runtime/
+# nvrtc/nvjitlink/curand). The libs below are lazy-loaded by torch and never dlopen'd
+# on this path, so we drop them IN THE SAME RUN as the install — deleting them in a
+# later layer would leave them in the lower layer and not shrink the image.
+#   nccl: torch.distributed (multi-GPU)   cufft: torch.fft   cusolver: torch.linalg
+#   cusparse/cusparselt: sparse ops       cupti: profiler    triton: torch.compile
 RUN python -m pip install --no-cache-dir --upgrade pip \
-    && python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+    && python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128 \
+    && SP="$(python -c 'import site;print(site.getsitepackages()[0])')" \
+    && rm -rf "$SP"/nvidia/nccl "$SP"/nvidia/cufft "$SP"/nvidia/cusolver \
+              "$SP"/nvidia/cusparse "$SP"/nvidia/cusparselt "$SP"/nvidia/cuda_cupti \
+              "$SP"/triton "$SP"/torch/include "$SP"/torch/test \
+    && python -c "import torch; print('torch', torch.__version__, 'cuda-build', torch.version.cuda)"
 
 COPY pyproject.toml README.md ./
 COPY app ./app
