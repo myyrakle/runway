@@ -110,8 +110,16 @@ def install_fake_fastapi_modules() -> None:
             self.status_code = status_code
             self.detail = detail
 
+    class FakeRequest:
+        def __init__(self, payload=None) -> None:
+            self._payload = {} if payload is None else payload
+
+        async def json(self):
+            return self._payload
+
     fake_fastapi.FastAPI = FakeFastAPI
     fake_fastapi.HTTPException = FakeHTTPException
+    fake_fastapi.Request = FakeRequest
     sys.modules["fastapi"] = fake_fastapi
 
     fake_concurrency = types.ModuleType("fastapi.concurrency")
@@ -121,3 +129,13 @@ def install_fake_fastapi_modules() -> None:
 
     fake_concurrency.run_in_threadpool = run_in_threadpool
     sys.modules["fastapi.concurrency"] = fake_concurrency
+
+    fake_responses = types.ModuleType("fastapi.responses")
+
+    class FakeJSONResponse:
+        def __init__(self, content=None, status_code: int = 200, **kwargs) -> None:
+            self.content = content
+            self.status_code = status_code
+
+    fake_responses.JSONResponse = FakeJSONResponse
+    sys.modules["fastapi.responses"] = fake_responses

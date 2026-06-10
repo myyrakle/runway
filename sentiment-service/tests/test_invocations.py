@@ -51,31 +51,46 @@ class InvocationTests(unittest.TestCase):
         main_module._get_variant = self.original_get_variant
 
     def test_invocations_batch_uses_same_batch_inference_path(self) -> None:
-        req = InvocationRequest(texts=["a", "b"], aspect="battery")
+        result = asyncio.run(
+            main_module._dispatch_invocation({"texts": ["a", "b"], "aspect": "battery"})
+        )
 
-        result = asyncio.run(main_module.invocations(req))
-
-        self.assertEqual(len(result.results), 2)
+        self.assertEqual(len(result["results"]), 2)
         self.assertEqual(self.model.batch_calls, [(["a", "b"], "battery")])
         self.assertEqual(self.model.single_calls, [])
 
     def test_invocations_single_text_uses_single_inference_path(self) -> None:
-        req = InvocationRequest(text="a", aspect="battery")
+        result = asyncio.run(
+            main_module._dispatch_invocation({"text": "a", "aspect": "battery"})
+        )
 
-        result = asyncio.run(main_module.invocations(req))
-
-        self.assertEqual(result.sentiment, "positive")
+        self.assertEqual(result["sentiment"], "positive")
         self.assertEqual(self.model.single_calls, [("a", "battery")])
         self.assertEqual(self.model.batch_calls, [])
 
     def test_invocations_instances_payload_uses_batch_inference_path(self) -> None:
-        req = InvocationRequest(instances=["a", "b", "c"], aspect="screen")
+        result = asyncio.run(
+            main_module._dispatch_invocation(
+                {"instances": ["a", "b", "c"], "aspect": "screen"}
+            )
+        )
 
-        result = asyncio.run(main_module.invocations(req))
-
-        self.assertEqual(len(result.results), 3)
+        self.assertEqual(len(result["results"]), 3)
         self.assertEqual(self.model.batch_calls, [(["a", "b", "c"], "screen")])
         self.assertEqual(self.model.single_calls, [])
+
+    def test_invocations_requires_exactly_one_payload_field(self) -> None:
+        from fastapi import HTTPException
+
+        for body in ({}, {"text": "a", "texts": ["b"]}):
+            with self.assertRaises(HTTPException):
+                asyncio.run(main_module._dispatch_invocation(body))
+
+    def test_invocations_rejects_empty_batch(self) -> None:
+        from fastapi import HTTPException
+
+        with self.assertRaises(HTTPException):
+            asyncio.run(main_module._dispatch_invocation({"texts": []}))
 
     def test_invocation_schema_documents_texts_for_batch(self) -> None:
         schema = InvocationRequest.model_json_schema()

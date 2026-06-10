@@ -31,6 +31,14 @@ tensorrt = [
     "onnxruntime-gpu>=1.18.0,<1.24",
     "tensorrt-cu12>=10.0.0,<11.0.0",
 ]
+# Runtime-only subset of `tensorrt`: the native TensorRT backend (app/model.py)
+# imports only `tensorrt` + `torch` at serve time — never onnx/onnxruntime, which
+# are export-build tooling. The multi-stage tensorrt image installs this in its
+# runtime layer so the ONNX stack never ships. Same tensorrt-cu12 pin as above so
+# the .plan baked by the builder deserializes against the runtime's TensorRT.
+tensorrt-runtime = [
+    "tensorrt-cu12>=10.0.0,<11.0.0",
+]
 
 [build-system]
 requires = ["hatchling"]

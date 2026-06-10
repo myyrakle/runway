@@ -21,6 +21,7 @@ from app.config import (
     ONNX_MODEL_PATH,
     PAD_TO_MULTIPLE_OF,
     SORT_BATCH_BY_LENGTH,
+    TOKENIZER_SOURCE,
     TRT_ENGINE_PATH,
     TRT_CUDA_GRAPH,
     ORT_TRT_CACHE_PATH,
@@ -45,7 +46,7 @@ class DeBERTaABSA:
             f"[Model] Loading DeBERTa ABSA ({MODEL_NAME}) "
             f"precision={precision} backend={self.backend}..."
         )
-        self.tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
+        self.tokenizer = AutoTokenizer.from_pretrained(TOKENIZER_SOURCE)
 
         if self.backend != "pytorch":
             if self.backend in {"onnx-cuda", "ort-trt", "tensorrt"}:

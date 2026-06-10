@@ -11,6 +11,12 @@ VALID_BACKENDS = ("pytorch", "onnx-cuda", "ort-trt", "tensorrt")
 # ABSA model (HuggingFace repo id).
 MODEL_NAME = os.environ.get("MODEL_NAME", "yangheng/deberta-v3-base-absa-v1.1")
 
+# Tokenizer source. Defaults to MODEL_NAME (the HF repo id). The tensorrt image
+# bakes only the tokenizer into a local directory and points this at it, so that
+# runtime needs neither the HF hub nor the full model weights — the .plan engine
+# carries the weights. A local path is loaded offline by transformers directly.
+TOKENIZER_SOURCE = os.environ.get("TOKENIZER_PATH", MODEL_NAME)
+
 # Inference backend. Non-PyTorch backends require exported artifacts.
 INFERENCE_BACKEND = os.environ.get("INFERENCE_BACKEND", "pytorch")
 if INFERENCE_BACKEND not in VALID_BACKENDS:
