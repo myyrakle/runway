@@ -56,18 +56,12 @@ RUN python -c "import glob,os,site; dirs=[p for r in (site.getsitepackages()+[si
     && ldconfig
 
 ARG BUILD_ENGINE=1
-# Runs ON the GPU via BuildKit CDI: `--device=nvidia.com/gpu=all` mounts the host GPU
-# into THIS step only. Without it (or without --allow device on the build CLI), the GPU
-# is not injected and trt.Builder() dies with CUDA error 35. Exports fp32 ONNX, lets TRT
-# do the fp16 conversion (--fp16), and warms the HF cache with the tokenizer the runtime
-# loads offline. The .onnx is a pure build intermediate and never leaves this stage.
-# CDI injects the driver device nodes (/dev/nvidia*) AND the host driver libs, but the
-# CDI ldconfig hook does NOT run in the build context, so libcuda.so/libnvidia-ml.so
-# land on disk without being registered in the loader cache -> trt.Builder() dies with
-# CUDA error 35. Re-run ldconfig here (picks up the CDI-mounted libs in the default
-# dirs) and add their dirs to LD_LIBRARY_PATH as a belt-and-suspenders for non-standard
-# mount locations. Both only take effect inside THIS --device RUN, which is correct:
-# the driver libs are bind-mounted only for this step and never reach the image.
+# Builds the engine ON the GPU. `--device=nvidia.com/gpu=all` (BuildKit CDI) mounts the
+# host GPU into this step only — needs `--allow device=...` on the build CLI. CDI mounts
+# the driver libs but does NOT run its ldconfig hook in the build context, so we re-run
+# ldconfig (+ LD_LIBRARY_PATH) here; without it libcuda.so isn't found and trt.Builder()
+# dies with CUDA error 35. Exports fp32 ONNX, lets TRT do fp16 (--fp16), and warms the HF
+# tokenizer cache. The .onnx is a build intermediate and never leaves this stage.
 RUN --device=nvidia.com/gpu=all \
     if [ "$BUILD_ENGINE" = "1" ]; then \
       ldconfig && \
