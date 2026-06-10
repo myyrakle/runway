@@ -28,6 +28,7 @@ WITH_CUDA = LD_LIBRARY_PATH="$$(ls -d $(VENV)/lib/python*/site-packages/nvidia/*
 .PHONY: serve-fp16 serve-onnx-cuda serve-ort-trt serve-tensorrt serve-tensorrt-cudagraph
 .PHONY: onnx-export onnx-export-fp16 onnx-cuda-sample ort-trt-sample trt-build trt-sample trt-sample-cudagraph
 .PHONY: docker-build-onnx-cuda docker-build-ort-trt docker-build-tensorrt docker-build-tensorrt-cudagraph
+.PHONY: docker-build-tensorrt-buildkit docker-build-tensorrt-cudagraph-buildkit
 
 # Serve the FastAPI app (uvicorn). Each target sets the backend + artifact paths
 # the app reads at startup, plus the CUDA loader path. Hit http://HOST:PORT/docs.
@@ -88,3 +89,17 @@ docker-build-tensorrt:
 
 docker-build-tensorrt-cudagraph:
 	DOCKER_BUILDKIT=0 docker build -f docker/Dockerfile.sagemaker-cu128-tensorrt --build-arg CUDA_GRAPH=1 --build-arg PAD_MULTIPLE=$(PAD_MULTIPLE) -t sentiment-service:cu128-tensorrt-cudagraph .
+
+# BuildKit alternative to docker-build-tensorrt. Instead of DOCKER_BUILDKIT=0 +
+# default-runtime: nvidia, this injects the GPU into the engine-build step via
+# BuildKit's CDI device support (RUN --device=nvidia.com/gpu=all in the *-buildkit
+# Dockerfile). Build-host requirements:
+#   - Docker Engine 28+ / BuildKit 0.20+ / Buildx 0.21+
+#   - CDI spec generated:  sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+#   - CDI enabled in daemon:  /etc/docker/daemon.json -> {"features":{"cdi":true}}
+# `--allow device=nvidia.com/gpu=all` grants the device entitlement to the build.
+docker-build-tensorrt-buildkit:
+	docker buildx build --allow device=nvidia.com/gpu=all -f docker/Dockerfile.sagemaker-cu128-tensorrt-buildkit -t sentiment-service:cu128-tensorrt --load .
+
+docker-build-tensorrt-cudagraph-buildkit:
+	docker buildx build --allow device=nvidia.com/gpu=all -f docker/Dockerfile.sagemaker-cu128-tensorrt-buildkit --build-arg CUDA_GRAPH=1 --build-arg PAD_MULTIPLE=$(PAD_MULTIPLE) -t sentiment-service:cu128-tensorrt-cudagraph --load .

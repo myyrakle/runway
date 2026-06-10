@@ -1,0 +1,141 @@
+# syntax=docker/dockerfile:1.14
+# BuildKit variant of Dockerfile.sagemaker-cu128-tensorrt.
+#
+# Same multi-stage layout and runtime as the legacy file; the ONLY difference is HOW
+# the GPU is injected into the engine-build step. BuildKit ignores the daemon's
+# `default-runtime: nvidia`, so the legacy trick (DOCKER_BUILDKIT=0 + default-runtime)
+# does not work here. Instead this file uses BuildKit's CDI device support to mount the
+# GPU into the single RUN that builds the engine (`RUN --device=nvidia.com/gpu=all`).
+#
+# Requirements on the BUILD host:
+#   - Docker Engine 28+ / BuildKit 0.20+ / Buildx 0.21+
+#   - nvidia-container-toolkit with a CDI spec generated:
+#       sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+#   - CDI enabled in the daemon (/etc/docker/daemon.json):  {"features":{"cdi":true}}
+#     (default-runtime: nvidia is NOT required for this file)
+# Build with (see Makefile target docker-build-tensorrt-buildkit):
+#   docker buildx build --allow device=nvidia.com/gpu=all \
+#     -f docker/Dockerfile.sagemaker-cu128-tensorrt-buildkit -t ... --load .
+#
+# As with the legacy file, the .plan engine is locked to the build GPU's architecture
+# and the tensorrt-cu12 wheel version, so build host GPU and inference GPU must match.
+ARG PYTHON_BASE=python:3.10-slim
+ARG TENSORRT_SPEC=tensorrt-cu12>=10.0.0,<11.0.0
+
+# ============================== builder ==============================
+FROM ${PYTHON_BASE} AS builder
+ARG TENSORRT_SPEC
+WORKDIR /opt/program
+
+# The GPU is injected per-RUN via `--device` (below), not via default-runtime, so these
+# NVIDIA_* vars are only belt-and-suspenders for the container-toolkit. PYTHONUNBUFFERED
+# and the model/path env mirror the legacy file.
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    PYTHONUNBUFFERED=1 \
+    HF_HOME=/opt/program/.cache/huggingface \
+    MODEL_NAME=yangheng/deberta-v3-base-absa-v1.1 \
+    ONNX_MODEL_PATH=/opt/program/artifacts/model.onnx \
+    TRT_ENGINE_PATH=/opt/program/artifacts/model.plan \
+    INFERENCE_BATCH_SIZE=32
+
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+
+COPY pyproject.toml README.md ./
+COPY app ./app
+COPY scripts ./scripts
+
+# Build deps: torch+transformers (ONNX export) and tensorrt-cu12 (engine build). onnx
+# pulled by the extra is harmless here; none of it reaches the runtime stage.
+RUN python -m pip install --no-cache-dir -e ".[tensorrt]"
+
+# torch's bundled CUDA libs + tensorrt_libs on the loader path so the TRT builder (and
+# torch CUDA) resolve their .so during the engine build.
+RUN python -c "import glob,os,site; dirs=[p for r in (site.getsitepackages()+[site.getusersitepackages()]) for p in glob.glob(os.path.join(r,'nvidia','*','lib'))+glob.glob(os.path.join(r,'tensorrt_libs'))]; open('/etc/ld.so.conf.d/cuda-trt-libs.conf','w').write('\n'.join(dirs)+'\n')" \
+    && ldconfig
+
+ARG BUILD_ENGINE=1
+# Runs ON the GPU via BuildKit CDI: `--device=nvidia.com/gpu=all` mounts the host GPU
+# into THIS step only. Without it (or without --allow device on the build CLI), the GPU
+# is not injected and trt.Builder() dies with CUDA error 35. Exports fp32 ONNX, lets TRT
+# do the fp16 conversion (--fp16), and warms the HF cache with the tokenizer the runtime
+# loads offline. The .onnx is a pure build intermediate and never leaves this stage.
+RUN --device=nvidia.com/gpu=all \
+    if [ "$BUILD_ENGINE" = "1" ]; then \
+      python scripts/export_onnx.py --model-name "$MODEL_NAME" --output "$ONNX_MODEL_PATH" && \
+      python scripts/build_trt_engine.py --onnx "$ONNX_MODEL_PATH" --output "$TRT_ENGINE_PATH" --opt-batch "$INFERENCE_BATCH_SIZE" --max-batch "$INFERENCE_BATCH_SIZE" --max-seq 512 --fp16 && \
+      rm -f "$ONNX_MODEL_PATH"; \
+    fi
+
+# ============================== runtime ==============================
+FROM ${PYTHON_BASE}
+ARG TENSORRT_SPEC
+WORKDIR /opt/program
+
+ENV PYTHONUNBUFFERED=1 \
+    PORT=8080 \
+    HF_HOME=/opt/program/.cache/huggingface \
+    MODEL_NAME=yangheng/deberta-v3-base-absa-v1.1 \
+    DEFAULT_PRECISION=fp16 \
+    ALLOWED_PRECISIONS=fp16 \
+    INFERENCE_BACKEND=tensorrt \
+    TRT_ENGINE_PATH=/opt/program/artifacts/model.plan \
+    INFERENCE_BATCH_SIZE=32 \
+    MAX_BATCH_TOKENS=16384
+
+# Optional: native-TRT CUDA-graph path. Build with `--build-arg CUDA_GRAPH=1` to bake
+# a graph-enabled image (near-constant per-shape latency, lower jitter), or just pass
+# `-e TRT_CUDA_GRAPH=1 -e PAD_TO_MULTIPLE_OF=64` at `docker run` since both are plain
+# runtime env vars. PAD_TO_MULTIPLE_OF buckets sequence lengths so only a few shapes
+# (= a few captured graphs) appear.
+ARG CUDA_GRAPH=0
+ARG PAD_MULTIPLE=64
+ENV TRT_CUDA_GRAPH=${CUDA_GRAPH} \
+    PAD_TO_MULTIPLE_OF=${PAD_MULTIPLE}
+
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+
+COPY pyproject.toml README.md ./
+COPY app ./app
+
+# The native TensorRT path needs ONLY torch (CUDA IO tensors/streams) + tensorrt-cu12
+# (engine load/execute). onnxruntime-gpu/onnx belong to the onnx-cuda & ort-trt
+# backends, which this image never selects — so install the base package plus
+# tensorrt-cu12 directly instead of the .[tensorrt] extra to keep onnxruntime out.
+# Same TENSORRT_SPEC as the builder so the engine's TRT version matches.
+RUN python -m pip install --no-cache-dir -e . \
+    && python -m pip install --no-cache-dir "${TENSORRT_SPEC}"
+
+# Register torch's bundled CUDA libs + tensorrt_libs on the loader path, then drop the
+# torch extras the native-TRT inference path never loads — in the SAME RUN so the
+# removed bytes don't linger in a lower layer. The nvidia/* CUDA libs stay: TensorRT
+# itself links cuDNN/cuBLAS. The trailing import is a build-time guard that fails the
+# build if a removed lib turns out to be required.
+RUN python -c "import glob,os,site; dirs=[p for r in (site.getsitepackages()+[site.getusersitepackages()]) for p in glob.glob(os.path.join(r,'nvidia','*','lib'))+glob.glob(os.path.join(r,'tensorrt_libs'))]; open('/etc/ld.so.conf.d/cuda-trt-libs.conf','w').write('\n'.join(dirs)+'\n')" \
+    && ldconfig \
+    && SP="$(python -c 'import site;print(site.getsitepackages()[0])')" \
+    && rm -rf "$SP"/triton "$SP"/torch/include "$SP"/torch/test \
+    && python -c "import torch, tensorrt; print('torch', torch.__version__, 'trt', tensorrt.__version__)"
+
+# The engine + the tokenizer cache (for offline AutoTokenizer.from_pretrained) are the
+# only build outputs the runtime needs. The model weights in the cache are unused by
+# the tensorrt backend (it loads the .plan), but the full cache is copied for now;
+# tokenizer-only pruning is a safe follow-up.
+COPY --from=builder /opt/program/artifacts/model.plan /opt/program/artifacts/model.plan
+COPY --from=builder /opt/program/.cache /opt/program/.cache
+
+# Fully offline at runtime: the tokenizer is read ONLY from the copied cache, never
+# the Hub. Without these, AutoTokenizer.from_pretrained() still does a HEAD/etag
+# request on startup — adding latency, and stalling/failing whenever the Hub is down
+# or egress is blocked.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
+
+RUN printf '#!/bin/sh\nexec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}\n' > /usr/local/bin/serve \
+    && chmod +x /usr/local/bin/serve
+
+EXPOSE 8080
+
+CMD ["serve"]
