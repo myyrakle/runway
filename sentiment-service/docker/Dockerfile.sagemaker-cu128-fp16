@@ -14,22 +14,20 @@ ENV PYTHONUNBUFFERED=1 \
 # already carries ca-certificates for the https wheel downloads.
 
 # torch cu128 bundles the full CUDA runtime as nvidia-* site-packages (~4GB).
-# Most of those .so are DT_NEEDED by libtorch_cuda.so and load at `import torch`
-# (e.g. libcusparseLt), so they cannot be removed. Only the ones torch never links
-# nor dlopens on the single-GPU eager inference path are dropped here — and IN THE
-# SAME RUN as the install, since deleting them in a later layer would leave them in
-# the lower layer and not shrink the image. The trailing `import torch` is a build-
-# time guard that fails the build if a removed lib turns out to be required.
-#   triton: torch.compile (pure-python JIT, never linked)
-#   nccl:   torch.distributed multi-GPU collectives (dlopen, single-GPU never hits)
-# NB: cupti is NOT removable here — libtorch_cuda.so links libcupti.so.12 as
-# DT_NEEDED in this 2.8.0+cu128 build, so dropping nvidia/cuda_cupti makes
-# `import torch` fail at load (the guard below catches it).
+# In this 2.8.0+cu128 build EVERY nvidia/* runtime lib — cusparseLt, cupti, AND
+# nccl included — is DT_NEEDED by libtorch_cuda.so and loaded at `import torch`,
+# so none of the nvidia/* dirs can be dropped (each was tried and the guard below
+# caught the resulting `libXXX.so: cannot open shared object file`). Only artifacts
+# torch never loads at runtime are removed, and IN THE SAME RUN as the install since
+# deleting them in a later layer would leave them in the lower layer and not shrink
+# the image. The trailing `import torch` is the guard that proves the cut is safe.
+#   triton:        torch.compile (pure-python JIT, never linked) — safe to drop
+#   torch/include: C++ headers, build-time only
+#   torch/test:    bundled test suite
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128 \
     && SP="$(python -c 'import site;print(site.getsitepackages()[0])')" \
-    && rm -rf "$SP"/nvidia/nccl \
-              "$SP"/triton "$SP"/torch/include "$SP"/torch/test \
+    && rm -rf "$SP"/triton "$SP"/torch/include "$SP"/torch/test \
     && python -c "import torch; print('torch', torch.__version__, 'cuda-build', torch.version.cuda)"
 
 COPY pyproject.toml README.md ./
