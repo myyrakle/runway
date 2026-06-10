@@ -55,6 +55,39 @@ RUN python -m pip install --no-cache-dir -e ".[tensorrt]"
 RUN python -c "import glob,os,site; dirs=[p for r in (site.getsitepackages()+[site.getusersitepackages()]) for p in glob.glob(os.path.join(r,'nvidia','*','lib'))+glob.glob(os.path.join(r,'tensorrt_libs'))]; open('/etc/ld.so.conf.d/cuda-trt-libs.conf','w').write('\n'.join(dirs)+'\n')" \
     && ldconfig
 
+# ===== TEMPORARY DIAGNOSTIC (remove after debugging) =====
+# Runs in the same CDI GPU context as the engine build, dumps what libcuda/device
+# state actually looks like, then exits 1 so we get the logs fast (no slow ONNX export).
+RUN --device=nvidia.com/gpu=all <<'EOF'
+set -x
+echo "===== /dev/nvidia* ====="
+ls -l /dev/nvidia* 2>&1 || echo "NO /dev/nvidia* DEVICE NODES"
+echo "===== all libcuda.so* on fs ====="
+find / -name 'libcuda.so*' 2>/dev/null
+echo "===== what the find|head -n1 hack picks ====="
+find / -name 'libcuda.so*' 2>/dev/null | head -n1
+echo "===== all libnvidia-ml.so* ====="
+find / -name 'libnvidia-ml.so*' 2>/dev/null
+ldconfig
+echo "===== ldconfig cache (cuda / nvidia-ml) ====="
+ldconfig -p | grep -Ei 'libcuda|nvidia-ml' || echo "none in cache"
+echo "===== ctypes libcuda probe (driverVersion: 13000=CUDA13, 0/err=stub) ====="
+python - <<'PY'
+import ctypes
+for cand in ["libcuda.so.1", "libcuda.so"]:
+    try:
+        lib = ctypes.CDLL(cand)
+        r = lib.cuInit(0)
+        v = ctypes.c_int()
+        lib.cuDriverGetVersion(ctypes.byref(v))
+        print(cand, "loaded OK | cuInit ret =", r, "| driverVersion =", v.value, "| path-hint:", getattr(lib, "_name", "?"))
+    except Exception as e:
+        print(cand, "FAILED:", repr(e))
+PY
+echo "===== done — intentional exit 1 to stop fast ====="
+exit 1
+EOF
+
 ARG BUILD_ENGINE=1
 # Builds the engine ON the GPU. `--device=nvidia.com/gpu=all` (BuildKit CDI) mounts the
 # host GPU into this step only — needs `--allow device=...` on the build CLI. CDI mounts
