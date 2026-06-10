@@ -41,10 +41,26 @@ RUN python -c "import glob,os,site; dirs=[p for r in (site.getsitepackages()+[si
     && ldconfig
 
 ARG BUILD_ENGINE=1
+# Build the .plan, then drop the .onnx in the SAME layer. The tensorrt backend
+# loads TRT_ENGINE_PATH only (see app/model.py), so the ~700MB ONNX is a pure
+# build intermediate. Deleting it in a later RUN would leave it in a lower
+# layer and not shrink the image, so the rm must live in this same RUN.
 RUN if [ "$BUILD_ENGINE" = "1" ]; then \
       python scripts/export_onnx.py --model-name "$MODEL_NAME" --output "$ONNX_MODEL_PATH" && \
-      python scripts/build_trt_engine.py --onnx "$ONNX_MODEL_PATH" --output "$TRT_ENGINE_PATH" --opt-batch "$INFERENCE_BATCH_SIZE" --max-batch "$INFERENCE_BATCH_SIZE" --max-seq 512 --fp16; \
+      python scripts/build_trt_engine.py --onnx "$ONNX_MODEL_PATH" --output "$TRT_ENGINE_PATH" --opt-batch "$INFERENCE_BATCH_SIZE" --max-batch "$INFERENCE_BATCH_SIZE" --max-seq 512 --fp16 && \
+      rm -f "$ONNX_MODEL_PATH"; \
     fi
+
+# Runtime is fully offline. export_onnx.py (in the BUILD_ENGINE step above) baked the
+# tokenizer into the HF cache, so force transformers/hub to read ONLY that cache and
+# never reach huggingface.co. At runtime this backend loads the local .plan engine +
+# tokenizer from cache; without these flags AutoTokenizer.from_pretrained() still does
+# a HEAD/etag request to the Hub on startup — adding latency, and stalling/failing the
+# container whenever the Hub is down or egress is blocked. Must stay AFTER the build
+# step (it needs the network). Override with `-e HF_HUB_OFFLINE=0` if you built with
+# BUILD_ENGINE=0 and supply your own engine + cached tokenizer.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 
 RUN printf '#!/bin/sh\nexec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}\n' > /usr/local/bin/serve \
     && chmod +x /usr/local/bin/serve

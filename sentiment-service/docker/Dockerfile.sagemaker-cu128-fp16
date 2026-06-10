@@ -13,18 +13,20 @@ ENV PYTHONUNBUFFERED=1 \
 # ships a manylinux wheel, so `pip install -e .` needs no compiler. python:3.10-slim
 # already carries ca-certificates for the https wheel downloads.
 
-# torch cu128 bundles the full CUDA runtime as nvidia-* site-packages (~4GB). A
-# single-GPU eager fp16 transformer forward only touches cuDNN + cuBLAS (+ runtime/
-# nvrtc/nvjitlink/curand). The libs below are lazy-loaded by torch and never dlopen'd
-# on this path, so we drop them IN THE SAME RUN as the install — deleting them in a
-# later layer would leave them in the lower layer and not shrink the image.
-#   nccl: torch.distributed (multi-GPU)   cufft: torch.fft   cusolver: torch.linalg
-#   cusparse/cusparselt: sparse ops       cupti: profiler    triton: torch.compile
+# torch cu128 bundles the full CUDA runtime as nvidia-* site-packages (~4GB).
+# Most of those .so are DT_NEEDED by libtorch_cuda.so and load at `import torch`
+# (e.g. libcusparseLt), so they cannot be removed. Only the ones torch never links
+# nor dlopens on the single-GPU eager inference path are dropped here — and IN THE
+# SAME RUN as the install, since deleting them in a later layer would leave them in
+# the lower layer and not shrink the image. The trailing `import torch` is a build-
+# time guard that fails the build if a removed lib turns out to be required.
+#   triton: torch.compile (pure-python JIT, never linked)
+#   nccl:   torch.distributed multi-GPU collectives (dlopen, single-GPU never hits)
+#   cupti:  profiler/kineto (dlopen on demand)
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128 \
     && SP="$(python -c 'import site;print(site.getsitepackages()[0])')" \
-    && rm -rf "$SP"/nvidia/nccl "$SP"/nvidia/cufft "$SP"/nvidia/cusolver \
-              "$SP"/nvidia/cusparse "$SP"/nvidia/cusparselt "$SP"/nvidia/cuda_cupti \
+    && rm -rf "$SP"/nvidia/nccl "$SP"/nvidia/cuda_cupti \
               "$SP"/triton "$SP"/torch/include "$SP"/torch/test \
     && python -c "import torch; print('torch', torch.__version__, 'cuda-build', torch.version.cuda)"
 
@@ -43,6 +45,16 @@ ARG PRELOAD_MODEL=1
 RUN if [ "$PRELOAD_MODEL" = "1" ]; then \
       python -c "import os; from transformers import AutoModelForSequenceClassification, AutoTokenizer; model_name = os.environ['MODEL_NAME']; AutoTokenizer.from_pretrained(model_name); AutoModelForSequenceClassification.from_pretrained(model_name)"; \
     fi
+
+# Runtime is fully offline. PRELOAD_MODEL baked the model + tokenizer into the HF
+# cache above, so force transformers/hub to read ONLY that cache and never reach
+# huggingface.co. Without this, from_pretrained() still does a HEAD/etag request
+# to the Hub on every startup — adding latency, and stalling/failing the container
+# whenever the Hub is down or egress is blocked. Must stay AFTER the preload step
+# (that step needs the network). Override with `-e HF_HUB_OFFLINE=0` if you built
+# with PRELOAD_MODEL=0 and intend to download at runtime.
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 
 RUN printf '#!/bin/sh\nexec uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080}\n' > /usr/local/bin/serve \
     && chmod +x /usr/local/bin/serve

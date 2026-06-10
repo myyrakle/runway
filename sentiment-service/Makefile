@@ -77,8 +77,14 @@ docker-build-onnx-cuda:
 docker-build-ort-trt:
 	docker build -f docker/Dockerfile.sagemaker-cu128-ort-trt -t sentiment-service:cu128-ort-trt .
 
+# NOTE: DOCKER_BUILDKIT=0 forces the legacy builder. The Dockerfile builds the
+# TensorRT engine at image-build time, which needs a live GPU. BuildKit ignores
+# the daemon's `default-runtime: nvidia`, so the GPU is not injected and
+# `trt.Builder` fails with CUDA error 35. The legacy builder runs each RUN with
+# the default runtime, so the GPU is available. Requires `default-runtime: nvidia`
+# in /etc/docker/daemon.json on the build host.
 docker-build-tensorrt:
-	docker build -f docker/Dockerfile.sagemaker-cu128-tensorrt -t sentiment-service:cu128-tensorrt .
+	DOCKER_BUILDKIT=0 docker build -f docker/Dockerfile.sagemaker-cu128-tensorrt -t sentiment-service:cu128-tensorrt .
 
 docker-build-tensorrt-cudagraph:
-	docker build -f docker/Dockerfile.sagemaker-cu128-tensorrt --build-arg CUDA_GRAPH=1 --build-arg PAD_MULTIPLE=$(PAD_MULTIPLE) -t sentiment-service:cu128-tensorrt-cudagraph .
+	DOCKER_BUILDKIT=0 docker build -f docker/Dockerfile.sagemaker-cu128-tensorrt --build-arg CUDA_GRAPH=1 --build-arg PAD_MULTIPLE=$(PAD_MULTIPLE) -t sentiment-service:cu128-tensorrt-cudagraph .
