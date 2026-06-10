@@ -16,7 +16,13 @@ FROM ${PYTHON_BASE} AS builder
 ARG TENSORRT_SPEC
 WORKDIR /opt/program
 
-ENV PYTHONUNBUFFERED=1 \
+# The engine is built ON the GPU at image-build time (legacy builder +
+# default-runtime=nvidia). The old nvcr.io/nvidia/* base advertised these to the
+# nvidia-container-runtime implicitly; python:3.10-slim does not, so without them
+# the runtime injects no GPU/driver and trt.Builder() dies with CUDA error 35.
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    PYTHONUNBUFFERED=1 \
     HF_HOME=/opt/program/.cache/huggingface \
     MODEL_NAME=yangheng/deberta-v3-base-absa-v1.1 \
     ONNX_MODEL_PATH=/opt/program/artifacts/model.onnx \
