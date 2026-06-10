@@ -1,13 +1,24 @@
-# Multi-stage: build the TensorRT engine in a throwaway builder, ship a slim runtime.
+# syntax=docker/dockerfile:1-labs
+# BuildKit variant of Dockerfile.sagemaker-cu128-tensorrt.
 #
-# Why not the nvcr.io/nvidia/tensorrt base it used to use? That is a CUDA *devel*
-# image (~17.5GB) whose toolkit is only needed to BUILD the engine, not to run it.
-# The pip wheels are self-sufficient at runtime: torch cu128 bundles the CUDA runtime
-# under site-packages/nvidia/*, and tensorrt-cu12 ships libnvinfer under
-# site-packages/tensorrt_libs/ (see the Makefile WITH_CUDA target). The host NVIDIA
-# driver is injected by `--gpus` / default-runtime=nvidia. So BOTH stages run on
-# python:3.10-slim, and the engine the builder produces loads in the runtime because
-# both install the SAME tensorrt-cu12 wheel (a .plan is locked to its TRT version).
+# Same multi-stage layout and runtime as the legacy file; the ONLY difference is HOW
+# the GPU is injected into the engine-build step. BuildKit ignores the daemon's
+# `default-runtime: nvidia`, so the legacy trick (DOCKER_BUILDKIT=0 + default-runtime)
+# does not work here. Instead this file uses BuildKit's CDI device support to mount the
+# GPU into the single RUN that builds the engine (`RUN --device=nvidia.com/gpu=all`).
+#
+# Requirements on the BUILD host:
+#   - Docker Engine 28+ / BuildKit 0.20+ / Buildx 0.21+
+#   - nvidia-container-toolkit with a CDI spec generated:
+#       sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+#   - CDI enabled in the daemon (/etc/docker/daemon.json):  {"features":{"cdi":true}}
+#     (default-runtime: nvidia is NOT required for this file)
+# Build with (see Makefile target docker-build-tensorrt-buildkit):
+#   docker buildx build --allow device=nvidia.com/gpu=all \
+#     -f docker/Dockerfile.sagemaker-cu128-tensorrt-buildkit -t ... --load .
+#
+# As with the legacy file, the .plan engine is locked to the build GPU's architecture
+# and the tensorrt-cu12 wheel version, so build host GPU and inference GPU must match.
 ARG PYTHON_BASE=python:3.10-slim
 ARG TENSORRT_SPEC=tensorrt-cu12>=10.0.0,<11.0.0
 
@@ -16,10 +27,9 @@ FROM ${PYTHON_BASE} AS builder
 ARG TENSORRT_SPEC
 WORKDIR /opt/program
 
-# The engine is built ON the GPU at image-build time (legacy builder +
-# default-runtime=nvidia). The old nvcr.io/nvidia/* base advertised these to the
-# nvidia-container-runtime implicitly; python:3.10-slim does not, so without them
-# the runtime injects no GPU/driver and trt.Builder() dies with CUDA error 35.
+# The GPU is injected per-RUN via `--device` (below), not via default-runtime, so these
+# NVIDIA_* vars are only belt-and-suspenders for the container-toolkit. PYTHONUNBUFFERED
+# and the model/path env mirror the legacy file.
 ENV NVIDIA_VISIBLE_DEVICES=all \
     NVIDIA_DRIVER_CAPABILITIES=compute,utility \
     PYTHONUNBUFFERED=1 \
@@ -46,11 +56,16 @@ RUN python -c "import glob,os,site; dirs=[p for r in (site.getsitepackages()+[si
     && ldconfig
 
 ARG BUILD_ENGINE=1
-# Runs ON the GPU at image-build time (legacy builder + default-runtime=nvidia — this
-# is why the Makefile sets DOCKER_BUILDKIT=0). Exports fp32 ONNX, lets TRT do the fp16
-# conversion (--fp16), and warms the HF cache with the tokenizer the runtime loads
-# offline. The .onnx is a pure build intermediate and never leaves this stage.
-RUN if [ "$BUILD_ENGINE" = "1" ]; then \
+# Builds the engine ON the GPU. `--device=nvidia.com/gpu=all` (BuildKit CDI) mounts the
+# host GPU into this step only — needs `--allow device=...` on the build CLI. CDI mounts
+# the driver libs but does NOT run its ldconfig hook in the build context, so we re-run
+# ldconfig (+ LD_LIBRARY_PATH) here; without it libcuda.so isn't found and trt.Builder()
+# dies with CUDA error 35. Exports fp32 ONNX, lets TRT do fp16 (--fp16), and warms the HF
+# tokenizer cache. The .onnx is a build intermediate and never leaves this stage.
+RUN --device=nvidia.com/gpu=all \
+    if [ "$BUILD_ENGINE" = "1" ]; then \
+      ldconfig && \
+      export LD_LIBRARY_PATH="$(dirname "$(find / -name 'libcuda.so*' 2>/dev/null | head -n1)"):$(dirname "$(find / -name 'libnvidia-ml.so*' 2>/dev/null | head -n1)"):${LD_LIBRARY_PATH}" && \
       python scripts/export_onnx.py --model-name "$MODEL_NAME" --output "$ONNX_MODEL_PATH" && \
       python scripts/build_trt_engine.py --onnx "$ONNX_MODEL_PATH" --output "$TRT_ENGINE_PATH" --opt-batch "$INFERENCE_BATCH_SIZE" --max-batch "$INFERENCE_BATCH_SIZE" --max-seq 512 --fp16 && \
       rm -f "$ONNX_MODEL_PATH"; \

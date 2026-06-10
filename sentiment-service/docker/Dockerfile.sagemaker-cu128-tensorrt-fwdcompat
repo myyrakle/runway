@@ -1,26 +1,33 @@
 # syntax=docker/dockerfile:1-labs
-# BuildKit variant of Dockerfile.sagemaker-cu128-tensorrt.
+# Forward-compatible variant of Dockerfile.sagemaker-cu128-tensorrt.
 #
-# Same multi-stage layout and runtime as the legacy file; the ONLY difference is HOW
-# the GPU is injected into the engine-build step. BuildKit ignores the daemon's
-# `default-runtime: nvidia`, so the legacy trick (DOCKER_BUILDKIT=0 + default-runtime)
-# does not work here. Instead this file uses BuildKit's CDI device support to mount the
-# GPU into the single RUN that builds the engine (`RUN --device=nvidia.com/gpu=all`).
+# WHY: the cu128 image needs a CUDA 12.x-capable driver, but some inference hosts
+# (e.g. SageMaker ml.g4dn = T4 + R470 = "CUDA 11.4") ship an old driver and the image
+# dies at startup with `createInferRuntime ... CUDA error 35` / "driver too old".
+# This variant bakes NVIDIA CUDA Forward Compatibility (the cuda-compat-12-8 userspace
+# libcuda) into the RUNTIME stage and puts it first on the loader path, so the cu128
+# runtime runs on top of the old R470 kernel driver.
 #
-# Requirements on the BUILD host:
-#   - Docker Engine 28+ / BuildKit 0.20+ / Buildx 0.21+
-#   - nvidia-container-toolkit with a CDI spec generated:
-#       sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
-#   - CDI enabled in the daemon (/etc/docker/daemon.json):  {"features":{"cdi":true}}
-#     (default-runtime: nvidia is NOT required for this file)
-# Build with (see Makefile target docker-build-tensorrt-buildkit):
+# CONSTRAINTS — read before building:
+#   1. Forward compat only works on DATA-CENTER (Tesla) GPUs. T4 qualifies. R470 is the
+#      minimum forward-compat base driver for CUDA 12.x, so this is the edge of support.
+#   2. Forward compat fixes the DRIVER mismatch only — it does NOT change the TensorRT
+#      engine's GPU-architecture lock. The .plan is built ON the builder-stage GPU, so
+#      this image MUST be built on the SAME arch as the inference host:
+#        - target ml.g4dn (T4, sm75)  ->  build this on a T4 host (sm75)
+#        - building it on an L4 host (sm89) produces an sm89 engine that will NOT load
+#          on a T4 and you get "engine plan generated on an incompatible device".
+#      For an L4 target (g6/g2) you do NOT need this file — use the plain tensorrt image
+#      on a new-driver host.
+#
+# Build the same way as the buildkit tensorrt image (CDI GPU into the engine step):
 #   docker buildx build --allow device=nvidia.com/gpu=all \
-#     -f docker/Dockerfile.sagemaker-cu128-tensorrt-buildkit -t ... --load .
-#
-# As with the legacy file, the .plan engine is locked to the build GPU's architecture
-# and the tensorrt-cu12 wheel version, so build host GPU and inference GPU must match.
+#     -f docker/Dockerfile.sagemaker-cu128-tensorrt-fwdcompat -t ... --load .
 ARG PYTHON_BASE=python:3.10-slim
 ARG TENSORRT_SPEC=tensorrt-cu12>=10.0.0,<11.0.0
+# The CUDA image whose forward-compat libs we copy into the runtime. Its CUDA version
+# must match the cu128 wheels (driver-side forward compat is keyed to the toolkit).
+ARG CUDA_COMPAT_IMAGE=nvidia/cuda:12.8.0-base-ubuntu22.04
 
 # ============================== builder ==============================
 FROM ${PYTHON_BASE} AS builder
@@ -71,6 +78,11 @@ RUN --device=nvidia.com/gpu=all \
       rm -f "$ONNX_MODEL_PATH"; \
     fi
 
+# ===== forward-compat libs (copied from an official CUDA image, no apt on slim) =====
+# The cuda-compat package ships the forward-compatible userspace libcuda under
+# /usr/local/cuda/compat in NVIDIA's base images. We grab just that dir.
+FROM ${CUDA_COMPAT_IMAGE} AS cudacompat
+
 # ============================== runtime ==============================
 FROM ${PYTHON_BASE}
 ARG TENSORRT_SPEC
@@ -96,6 +108,13 @@ ARG CUDA_GRAPH=0
 ARG PAD_MULTIPLE=64
 ENV TRT_CUDA_GRAPH=${CUDA_GRAPH} \
     PAD_TO_MULTIPLE_OF=${PAD_MULTIPLE}
+
+# Forward-compat libcuda. Placed FIRST on LD_LIBRARY_PATH so torch/TensorRT load this
+# CUDA-12.8-capable libcuda instead of the old host R470 libcuda the SageMaker nvidia
+# runtime injects into the default loader dirs. This is what lets cu128 run on R470.
+# On a host whose driver is already new enough (e.g. L4/g6) it is simply unused.
+COPY --from=cudacompat /usr/local/cuda/compat /opt/nvidia/cuda-compat
+ENV LD_LIBRARY_PATH=/opt/nvidia/cuda-compat:${LD_LIBRARY_PATH}
 
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128

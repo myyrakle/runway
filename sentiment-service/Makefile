@@ -28,7 +28,7 @@ WITH_CUDA = LD_LIBRARY_PATH="$$(ls -d $(VENV)/lib/python*/site-packages/nvidia/*
 .PHONY: serve-fp16 serve-onnx-cuda serve-ort-trt serve-tensorrt serve-tensorrt-cudagraph
 .PHONY: onnx-export onnx-export-fp16 onnx-cuda-sample ort-trt-sample trt-build trt-sample trt-sample-cudagraph
 .PHONY: docker-build-onnx-cuda docker-build-ort-trt docker-build-tensorrt docker-build-tensorrt-cudagraph
-.PHONY: docker-build-tensorrt-buildkit docker-build-tensorrt-cudagraph-buildkit
+.PHONY: docker-build-tensorrt-fwdcompat docker-build-tensorrt-fwdcompat-cudagraph
 
 # Serve the FastAPI app (uvicorn). Each target sets the backend + artifact paths
 # the app reads at startup, plus the CUDA loader path. Hit http://HOST:PORT/docs.
@@ -78,28 +78,28 @@ docker-build-onnx-cuda:
 docker-build-ort-trt:
 	docker build -f docker/Dockerfile.sagemaker-cu128-ort-trt -t sentiment-service:cu128-ort-trt .
 
-# NOTE: DOCKER_BUILDKIT=0 forces the legacy builder. The Dockerfile builds the
-# TensorRT engine at image-build time, which needs a live GPU. BuildKit ignores
-# the daemon's `default-runtime: nvidia`, so the GPU is not injected and
-# `trt.Builder` fails with CUDA error 35. The legacy builder runs each RUN with
-# the default runtime, so the GPU is available. Requires `default-runtime: nvidia`
-# in /etc/docker/daemon.json on the build host.
-docker-build-tensorrt:
-	DOCKER_BUILDKIT=0 docker build -f docker/Dockerfile.sagemaker-cu128-tensorrt -t sentiment-service:cu128-tensorrt .
-
-docker-build-tensorrt-cudagraph:
-	DOCKER_BUILDKIT=0 docker build -f docker/Dockerfile.sagemaker-cu128-tensorrt --build-arg CUDA_GRAPH=1 --build-arg PAD_MULTIPLE=$(PAD_MULTIPLE) -t sentiment-service:cu128-tensorrt-cudagraph .
-
-# BuildKit alternative to docker-build-tensorrt. Instead of DOCKER_BUILDKIT=0 +
-# default-runtime: nvidia, this injects the GPU into the engine-build step via
-# BuildKit's CDI device support (RUN --device=nvidia.com/gpu=all in the *-buildkit
-# Dockerfile). Build-host requirements:
+# The TensorRT engine is built at image-build time and needs a live GPU. BuildKit does
+# not honor the daemon's `default-runtime: nvidia`, so the GPU is injected into the
+# engine-build RUN via CDI (`RUN --device=nvidia.com/gpu=all` in the Dockerfile).
+# Build-host requirements:
 #   - Docker Engine 28+ / BuildKit 0.20+ / Buildx 0.21+
 #   - CDI spec generated:  sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
 #   - CDI enabled in daemon:  /etc/docker/daemon.json -> {"features":{"cdi":true}}
 # `--allow device=nvidia.com/gpu=all` grants the device entitlement to the build.
-docker-build-tensorrt-buildkit:
-	docker buildx build --allow device=nvidia.com/gpu=all -f docker/Dockerfile.sagemaker-cu128-tensorrt-buildkit -t sentiment-service:cu128-tensorrt --load .
+# NOTE: the .plan engine is locked to the BUILD GPU's architecture — build on the same
+# GPU family as the inference host (T4/sm75 for g4dn, L4/sm89 for g6).
+docker-build-tensorrt:
+	docker buildx build --allow device=nvidia.com/gpu=all -f docker/Dockerfile.sagemaker-cu128-tensorrt -t sentiment-service:cu128-tensorrt --load .
 
-docker-build-tensorrt-cudagraph-buildkit:
-	docker buildx build --allow device=nvidia.com/gpu=all -f docker/Dockerfile.sagemaker-cu128-tensorrt-buildkit --build-arg CUDA_GRAPH=1 --build-arg PAD_MULTIPLE=$(PAD_MULTIPLE) -t sentiment-service:cu128-tensorrt-cudagraph --load .
+docker-build-tensorrt-cudagraph:
+	docker buildx build --allow device=nvidia.com/gpu=all -f docker/Dockerfile.sagemaker-cu128-tensorrt --build-arg CUDA_GRAPH=1 --build-arg PAD_MULTIPLE=$(PAD_MULTIPLE) -t sentiment-service:cu128-tensorrt-cudagraph --load .
+
+# Forward-compatible variant: bakes cuda-compat-12-8 into the runtime so the cu128 image
+# runs on an OLD host driver (R470 / "CUDA 11.4", e.g. SageMaker ml.g4dn). Build the same
+# way (CDI GPU into the engine step). MUST be built on the same GPU arch as the target
+# (T4/sm75 for g4dn) — forward compat fixes the driver only, not the engine's arch lock.
+docker-build-tensorrt-fwdcompat:
+	docker buildx build --allow device=nvidia.com/gpu=all -f docker/Dockerfile.sagemaker-cu128-tensorrt-fwdcompat -t sentiment-service:cu128-tensorrt-fwdcompat --load .
+
+docker-build-tensorrt-fwdcompat-cudagraph:
+	docker buildx build --allow device=nvidia.com/gpu=all -f docker/Dockerfile.sagemaker-cu128-tensorrt-fwdcompat --build-arg CUDA_GRAPH=1 --build-arg PAD_MULTIPLE=$(PAD_MULTIPLE) -t sentiment-service:cu128-tensorrt-fwdcompat-cudagraph --load .
