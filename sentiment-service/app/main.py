@@ -8,13 +8,13 @@ Endpoints:
   POST /analyze/batch  list of texts (precision variant selectable)
   POST /benchmark      latency stats (precision / single|batch selectable)
 
-The inference endpoints (/invocations, /analyze, /analyze/batch) parse the raw
-JSON body and return a JSONResponse directly, deliberately bypassing Pydantic
-request/response models. On the hot path Pydantic was the dominant host-side
-cost: /invocations validated the texts list twice (once as InvocationRequest,
-again when rebuilt as BatchAnalyzeRequest) and the response_model rebuilt up to
-MAX_BATCH_ITEMS result objects per call before serializing. The model already
-returns plain dicts, so we hand them straight to JSONResponse.
+The inference endpoints (/invocations, /analyze, /analyze/batch) validate their
+request bodies with Pydantic models (app.schemas) so the request schema shows up
+in OpenAPI/Swagger, but they still return a JSONResponse of plain dicts rather
+than a response_model. The response rebuild was the dominant host-side Pydantic
+cost (the response_model reconstructed up to MAX_BATCH_ITEMS result objects per
+call before serializing); the model already returns plain dicts, so we hand them
+straight to JSONResponse and skip that step.
 """
 from __future__ import annotations
 
@@ -22,22 +22,24 @@ import threading
 import time
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse
 
 from app.config import (
     DEFAULT_PRECISION,
     DEVICE,
-    MAX_BATCH_ITEMS,
     MODEL_NAME,
     is_precision_allowed,
 )
 from app.model import DeBERTaABSA
 from app.schemas import (
+    AnalyzeRequest,
+    BatchAnalyzeRequest,
     BenchmarkRequest,
     BenchmarkResponse,
     HealthResponse,
+    InvocationRequest,
 )
 
 # Lazily-loaded model variants, keyed by precision.
@@ -93,30 +95,7 @@ async def ping() -> dict[str, str]:
     return {"status": "ok" if DEFAULT_PRECISION in _models else "loading"}
 
 
-# --- inference hot path (no Pydantic) ----------------------------------------
-
-def _aspect_precision(body: dict) -> tuple[str, str]:
-    aspect = body.get("aspect", "overall")
-    precision = body.get("precision", DEFAULT_PRECISION)
-    if not isinstance(aspect, str) or not isinstance(precision, str):
-        raise HTTPException(
-            status_code=400, detail="aspect and precision must be strings"
-        )
-    return aspect, precision
-
-
-def _require_batch(texts) -> list:
-    if not isinstance(texts, list) or not texts:
-        raise HTTPException(
-            status_code=400, detail="Batch texts must be a non-empty list"
-        )
-    if len(texts) > MAX_BATCH_ITEMS:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Batch size {len(texts)} exceeds MAX_BATCH_ITEMS ({MAX_BATCH_ITEMS})",
-        )
-    return texts
-
+# --- inference (Pydantic-validated request, plain-dict response) -------------
 
 async def _resolve_model(precision: str) -> DeBERTaABSA:
     # Hot path: an already-loaded variant is a plain dict hit, so resolve it on the
@@ -139,39 +118,26 @@ async def _run_batch(texts: list[str], aspect: str, precision: str) -> dict:
     return {"results": results}
 
 
-async def _dispatch_invocation(body: dict) -> dict:
-    """/invocations is batch-only: accept `texts` (or its `instances` alias)."""
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
-    texts = body.get("texts")
-    batch = _require_batch(texts if texts is not None else body.get("instances"))
-    aspect, precision = _aspect_precision(body)
-    return await _run_batch(batch, aspect, precision)
-
-
 @app.post("/invocations")
-async def invocations(request: Request) -> JSONResponse:
-    body = await request.json()
-    return JSONResponse(await _dispatch_invocation(body))
+async def invocations(body: InvocationRequest) -> JSONResponse:
+    """/invocations is batch-only: accept `texts` (or its `instances` alias)."""
+    batch = body.texts if body.texts is not None else body.instances
+    if batch is None:
+        raise HTTPException(
+            status_code=400,
+            detail="Batch texts required: provide `texts` or `instances`",
+        )
+    return JSONResponse(await _run_batch(batch, body.aspect, body.precision))
 
 
 @app.post("/analyze")
-async def analyze(request: Request) -> JSONResponse:
-    body = await request.json()
-    if not isinstance(body, dict) or not isinstance(body.get("text"), str):
-        raise HTTPException(status_code=400, detail="text is required")
-    aspect, precision = _aspect_precision(body)
-    return JSONResponse(await _run_single(body["text"], aspect, precision))
+async def analyze(body: AnalyzeRequest) -> JSONResponse:
+    return JSONResponse(await _run_single(body.text, body.aspect, body.precision))
 
 
 @app.post("/analyze/batch")
-async def analyze_batch(request: Request) -> JSONResponse:
-    body = await request.json()
-    if not isinstance(body, dict):
-        raise HTTPException(status_code=400, detail="Request body must be a JSON object")
-    batch = _require_batch(body.get("texts"))
-    aspect, precision = _aspect_precision(body)
-    return JSONResponse(await _run_batch(batch, aspect, precision))
+async def analyze_batch(body: BatchAnalyzeRequest) -> JSONResponse:
+    return JSONResponse(await _run_batch(body.texts, body.aspect, body.precision))
 
 
 @app.post("/benchmark", response_model=BenchmarkResponse)
