@@ -39,6 +39,10 @@ tensorrt = [
 tensorrt-runtime = [
     "tensorrt-cu12>=10.0.0,<11.0.0",
 ]
+# Load testing only (loadtest/locustfile.py); never shipped in a serving image.
+loadtest = [
+    "locust>=2.20.0",
+]
 
 [build-system]
 requires = ["hatchling"]

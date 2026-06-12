@@ -17,6 +17,14 @@ TRT_ENGINE ?= artifacts/model.plan
 ORT_TRT_CACHE ?= artifacts/ort_trt_cache
 SAMPLE_TEXTS ?= sample/texts.json
 
+# Load test (Locust). LOADTEST_HOST targets the running server; USERS = concurrent
+# users (closed-loop, ≈ in-flight requests); LOAD_BATCH = texts per request.
+LOADTEST_HOST ?= http://localhost:$(PORT)
+LOADTEST_SAMPLE ?= /home/myyrakle/Download/chunk-0.json
+USERS ?= 100
+LOAD_BATCH ?= 100
+RUN_TIME ?= 2m
+
 # torch's cu128 wheel bundles the CUDA runtime as nvidia-* site-packages
 # (libcusparseLt.so.0 etc.), and tensorrt-cu12 ships libnvinfer in tensorrt_libs/.
 # Point the dynamic loader at both so `import torch` and the ort-trt EP (which
@@ -29,6 +37,7 @@ WITH_CUDA = LD_LIBRARY_PATH="$$(ls -d $(VENV)/lib/python*/site-packages/nvidia/*
 .PHONY: onnx-export onnx-export-fp16 onnx-cuda-sample ort-trt-sample trt-build trt-sample trt-sample-cudagraph
 .PHONY: docker-build-onnx-cuda docker-build-ort-trt docker-build-tensorrt docker-build-tensorrt-cudagraph
 .PHONY: docker-build-tensorrt-fwdcompat docker-build-tensorrt-fwdcompat-cudagraph
+.PHONY: loadtest loadtest-headless
 
 # Serve the FastAPI app (uvicorn). Each target sets the backend + artifact paths
 # the app reads at startup, plus the CUDA loader path. Hit http://HOST:PORT/docs.
@@ -71,6 +80,18 @@ trt-sample-cudagraph:
 # Serve the FastAPI app on the native-TRT CUDA-graph path.
 serve-tensorrt-cudagraph:
 	$(WITH_CUDA) INFERENCE_BACKEND=tensorrt TRT_ENGINE_PATH=$(TRT_ENGINE) TRT_CUDA_GRAPH=1 PAD_TO_MULTIPLE_OF=$(PAD_MULTIPLE) DEFAULT_PRECISION=$(PRECISION) ALLOWED_PRECISIONS=$(PRECISION) INFERENCE_BATCH_SIZE=$(BATCH_SIZE) MAX_BATCH_TOKENS=$(MAX_BATCH_TOKENS) uv run uvicorn app.main:app --host $(HOST) --port $(PORT)
+
+# Locust load test against a running server. `make loadtest` opens the web UI
+# (http://localhost:8089); `make loadtest-headless` runs USERS for RUN_TIME and
+# writes a CSV report. Install first: `uv sync --extra loadtest`.
+loadtest:
+	SAMPLE_FILE=$(LOADTEST_SAMPLE) BATCH_SIZE=$(LOAD_BATCH) PRECISION=$(PRECISION) \
+		uv run locust -f loadtest/locustfile.py --host $(LOADTEST_HOST) -u $(USERS) -r $(USERS)
+
+loadtest-headless:
+	SAMPLE_FILE=$(LOADTEST_SAMPLE) BATCH_SIZE=$(LOAD_BATCH) PRECISION=$(PRECISION) \
+		uv run locust -f loadtest/locustfile.py --host $(LOADTEST_HOST) -u $(USERS) -r $(USERS) \
+		-t $(RUN_TIME) --headless --csv loadtest/report
 
 docker-build-onnx-cuda:
 	docker build -f docker/Dockerfile.sagemaker-cu128-onnx-cuda -t sentiment-service:cu128-onnx-cuda .
