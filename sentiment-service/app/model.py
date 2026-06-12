@@ -3,6 +3,7 @@
 ABSA input format [CLS] text [SEP] aspect [SEP], 3-class label map.
 Supports precision variants: fp32 (default), fp16 (CUDA), int8 (dynamic quant, CPU).
 """
+
 from __future__ import annotations
 
 import os
@@ -171,7 +172,7 @@ class DeBERTaABSA:
     ):
         if MAX_BATCH_TOKENS <= 0:
             for start in range(0, len(indexed_texts), INFERENCE_BATCH_SIZE):
-                yield indexed_texts[start:start + INFERENCE_BATCH_SIZE]
+                yield indexed_texts[start : start + INFERENCE_BATCH_SIZE]
             return
 
         chunk: list[tuple[int, str]] = []
@@ -220,12 +221,14 @@ class DeBERTaABSA:
             neg, neu, pos = prob
             label_idx = prob.index(max(prob))  # first-max index, matches argmax
             confidence = prob[label_idx]
-            results.append({
-                "sentiment": label_map[label_idx],
-                "confidence": confidence,
-                "is_negative": label_idx == 0 and confidence >= threshold,
-                "probs": {"negative": neg, "neutral": neu, "positive": pos},
-            })
+            results.append(
+                {
+                    "sentiment": label_map[label_idx],
+                    "confidence": confidence,
+                    "is_negative": label_idx == 0 and confidence >= threshold,
+                    "probs": {"negative": neg, "neutral": neu, "positive": pos},
+                }
+            )
 
         return results
 
@@ -298,14 +301,16 @@ class TensorRTRunner:
         ]
         # Partition IO once instead of re-scanning every call.
         self.input_names = [
-            name for name in self.tensor_names
+            name
+            for name in self.tensor_names
             if self.engine.get_tensor_mode(name) == trt.TensorIOMode.INPUT
         ]
         if "logits" in self.tensor_names:
             self.output_name = "logits"
         else:
             self.output_name = next(
-                name for name in self.tensor_names
+                name
+                for name in self.tensor_names
                 if self.engine.get_tensor_mode(name) == trt.TensorIOMode.OUTPUT
             )
         # Per-call host work (re-setting shapes/addresses, allocating the output)
@@ -326,35 +331,56 @@ class TensorRTRunner:
         # set_tensor_address / execute_async_v3 on this one context at the same
         # time — which corrupts it and surfaces as the Myelin "Called with an
         # already loaded binary graph" error / execute_async_v3 failures. This lock
-        # serializes the whole forward so only one worker drives the context at once.
+        # serializes only the context-driving part of a forward (shape/address
+        # binding, execute, and the copy of the result into a per-call buffer) so one
+        # worker drives the context at a time. The blocking GPU wait is deliberately
+        # left OUTSIDE the lock (see __call__) so other workers can submit their own
+        # forward and run host-side tokenization/post-processing while this one waits.
         self._lock = threading.Lock()
         if cuda_graph:
             print("[Model] TensorRT CUDA graph capture enabled (per input shape)")
 
     def __call__(self, **inputs):
         contiguous = {name: inputs[name].contiguous() for name in self.input_names}
+        # `.contiguous()` above is host-side prep and stays outside the lock.
+        done = torch.cuda.Event()
         with self._lock:
-            if self.cuda_graph:
-                key = tuple((name, tuple(contiguous[name].shape)) for name in self.input_names)
-                entry = self._graphs.get(key, "missing")
-                if entry == "missing":
-                    entry = self._capture(contiguous)
-                    self._graphs[key] = entry
-                if entry is not None:
-                    for name in self.input_names:
-                        entry.static_inputs[name].copy_(contiguous[name])
-                    entry.graph.replay()
-                    return self._detach_output(entry.static_output)
-            return self._detach_output(self._run_eager(contiguous))
+            logits = self._forward_locked(contiguous)
+            # Copy the shared output buffer into a private tensor and record an event,
+            # both submitted on the current stream while still holding the lock. The
+            # copy is therefore ordered ahead of the next worker's execute (submitted
+            # under the lock we are about to release), so that worker can reuse the
+            # shared buffer without clobbering this result before the copy reads it.
+            out = logits.clone()
+            done.record()
+        # The blocking GPU wait runs with the lock released: the next worker can grab
+        # the lock and submit its forward (queued behind this one on the same stream)
+        # while we wait here, and host-side tokenization/post-processing of other
+        # requests overlaps too. The event waits only for THIS call's copy, not for
+        # any later work another worker may have since queued on the stream.
+        done.synchronize()
+        return out
 
-    def _detach_output(self, logits):
-        # _run_eager's _output_cache and the captured graphs' static_output are
-        # reused across calls. Sync (so the work just submitted on the stream is
-        # complete) and return an independent copy while still holding self._lock,
-        # so once the lock is released the next worker can reuse the shared output
-        # buffer without clobbering this caller's result before it is read.
-        torch.cuda.current_stream().synchronize()
-        return logits.clone()
+    def _forward_locked(self, contiguous):
+        """Drive the execution context for one forward; caller must hold self._lock.
+
+        Returns the shared output buffer (reused across calls). The caller clones it
+        into a private tensor under the lock before releasing.
+        """
+        if self.cuda_graph:
+            key = tuple(
+                (name, tuple(contiguous[name].shape)) for name in self.input_names
+            )
+            entry = self._graphs.get(key, "missing")
+            if entry == "missing":
+                entry = self._capture(contiguous)
+                self._graphs[key] = entry
+            if entry is not None:
+                for name in self.input_names:
+                    entry.static_inputs[name].copy_(contiguous[name])
+                entry.graph.replay()
+                return entry.static_output
+        return self._run_eager(contiguous)
 
     def _bind_shapes(self, contiguous):
         context = self.context
@@ -375,8 +401,9 @@ class TensorRTRunner:
 
         output_shape = tuple(context.get_tensor_shape(self.output_name))
         # Reuse the device buffer for a given output shape (batch size) instead of
-        # allocating per call. Safe because the caller syncs (softmax(...).cpu())
-        # before the next forward pass reuses it.
+        # allocating per call. Safe because __call__ clones it into a per-call buffer
+        # (stream-ordered) before releasing the lock, so the next forward that reuses
+        # this buffer is queued after that copy and cannot clobber it.
         logits = self._output_cache.get(output_shape)
         if logits is None:
             logits = torch.empty(output_shape, dtype=torch.float32, device="cuda")
@@ -401,12 +428,16 @@ class TensorRTRunner:
         context = self.context
         try:
             # Static buffers the graph reads from / writes to on every replay.
-            static_inputs = {name: contiguous[name].clone() for name in self.input_names}
+            static_inputs = {
+                name: contiguous[name].clone() for name in self.input_names
+            }
             self._bind_shapes(static_inputs)
             for name in self.input_names:
                 context.set_tensor_address(name, static_inputs[name].data_ptr())
             output_shape = tuple(context.get_tensor_shape(self.output_name))
-            static_output = torch.empty(output_shape, dtype=torch.float32, device="cuda")
+            static_output = torch.empty(
+                output_shape, dtype=torch.float32, device="cuda"
+            )
             context.set_tensor_address(self.output_name, static_output.data_ptr())
             # The eager path's address cache no longer reflects the context bindings.
             self._addr_cache.clear()
