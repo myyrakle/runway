@@ -26,8 +26,13 @@ ARG TRT_IMAGE=nvcr.io/nvidia/tensorrt:25.05-py3
 # (compiled in rust-builder against TRT_IMAGE's glibc) fails to load. nvcr TensorRT
 # 25.x is Ubuntu 24.04 (glibc 2.39) — keep these aligned if you change TRT_IMAGE.
 ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04
+# Engine + chunking batch. INFERENCE_BATCH_SIZE is used for BOTH the engine's
+# opt/max batch (build) AND the runtime chunk size, so they always match. To serve a
+# bigger batch, rebuild with e.g. --build-arg INFERENCE_BATCH_SIZE=64 and bump
+# MAX_BATCH_TOKENS to >= 64*MAX_SEQ (or 0 to disable token-budget chunking).
 ARG INFERENCE_BATCH_SIZE=32
 ARG MAX_SEQ=512
+ARG MAX_BATCH_TOKENS=16384
 
 # ============================== 1. engine-builder ==============================
 # Mirrors sentiment-service's tensorrt build: fp32 ONNX export, TRT builds fp16.
@@ -116,6 +121,11 @@ RUN mkdir -p /trt-libs \
 # ============================== 3. runtime ==============================
 FROM ${CUDA_RUNTIME_IMAGE} AS runtime
 ARG MODEL_NAME
+# Inherit the build-time batch/seq values so the runtime chunker matches the engine
+# the builder produced (no hardcoded drift).
+ARG INFERENCE_BATCH_SIZE
+ARG MAX_BATCH_TOKENS
+ARG MAX_SEQ
 WORKDIR /opt/program
 
 ENV PYTHONUNBUFFERED=1 \
@@ -123,9 +133,9 @@ ENV PYTHONUNBUFFERED=1 \
     MODEL_NAME=${MODEL_NAME} \
     TRT_ENGINE_PATH=/opt/program/artifacts/model.plan \
     TOKENIZER_PATH=/opt/program/artifacts/tokenizer.json \
-    INFERENCE_BATCH_SIZE=32 \
-    MAX_BATCH_TOKENS=16384 \
-    MAX_LENGTH=512 \
+    INFERENCE_BATCH_SIZE=${INFERENCE_BATCH_SIZE} \
+    MAX_BATCH_TOKENS=${MAX_BATCH_TOKENS} \
+    MAX_LENGTH=${MAX_SEQ} \
     PAD_TO_MULTIPLE_OF=8 \
     RUST_LOG=info
 
