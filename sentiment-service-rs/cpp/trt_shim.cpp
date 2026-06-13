@@ -1,5 +1,5 @@
 // TensorRT 10.x inference-only shim. Deserializes a prebuilt engine and runs forward
-// passes; it never builds engines, so the runtime image can ship the lean runtime
+// passes; it never builds engines, so the runtime image ships only libnvinfer + cudart
 // (no builder, no ONNX parser). See trt_shim.h for the C ABI contract.
 #include "trt_shim.h"
 
@@ -180,10 +180,6 @@ extern "C" TrtEngine *trt_engine_load(const char *engine_path, const char **err)
     TrtEngine *h = new TrtEngine();
     h->runtime = nvinfer1::createInferRuntime(g_logger);
     if (!h->runtime) { delete h; return fail("createInferRuntime failed"); }
-
-    // Permit version-compatible engines (those built with kVERSION_COMPATIBLE, required
-    // for the lean runtime path). Harmless for standard engines.
-    h->runtime->setEngineHostCodeAllowed(true);
 
     h->engine = h->runtime->deserializeCudaEngine(blob.data(), blob.size());
     if (!h->engine) { delete h; return fail("deserializeCudaEngine failed"); }

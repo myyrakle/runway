@@ -24,7 +24,6 @@
 
 ARG MODEL_NAME=yangheng/deberta-v3-base-absa-v1.1
 ARG TENSORRT_PIP=tensorrt-cu12==10.16.1.11
-ARG TENSORRT_LEAN_PIP=tensorrt-lean-cu12==10.16.1.11
 ARG TRT_IMAGE=nvcr.io/nvidia/tensorrt:25.05-py3
 ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:12.8.0-base-ubuntu24.04
 # Image to grab the forward-compat userspace libcuda from. Its CUDA version must match
@@ -34,8 +33,6 @@ ARG CUDA_COMPAT_IMAGE=nvidia/cuda:12.8.0-base-ubuntu24.04
 ARG INFERENCE_BATCH_SIZE=32
 ARG MAX_SEQ=512
 ARG MAX_BATCH_TOKENS=16384
-# TRT_LEAN=1: ship the smaller lean runtime (see docker/Dockerfile for details).
-ARG TRT_LEAN=0
 
 # ============================== 1. engine-builder ==============================
 FROM python:3.10-slim AS engine-builder
@@ -43,8 +40,6 @@ ARG MODEL_NAME
 ARG INFERENCE_BATCH_SIZE
 ARG MAX_SEQ
 ARG TENSORRT_PIP
-ARG TENSORRT_LEAN_PIP
-ARG TRT_LEAN
 WORKDIR /build
 
 ENV PYTHONUNBUFFERED=1 \
@@ -60,11 +55,7 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
 
 COPY scripts ./scripts
 RUN python -m pip install --no-cache-dir -r scripts/requirements-build.txt \
-    && python -m pip install --no-cache-dir "${TENSORRT_PIP}" \
-    && if [ "$TRT_LEAN" = "1" ]; then \
-         python -m pip install --no-cache-dir "${TENSORRT_LEAN_PIP}" \
-         && python -c "import glob,os,shutil,site; sp=site.getsitepackages()[0]; dst=os.path.join(sp,'tensorrt_libs'); [shutil.copy(p,dst) for p in glob.glob(os.path.join(sp,'**','libnvinfer_lean.so*'),recursive=True)]; print('lean libs ->', os.listdir(dst))"; \
-       fi
+    && python -m pip install --no-cache-dir "${TENSORRT_PIP}"
 
 RUN python -c "import glob,os,site; dirs=[p for r in (site.getsitepackages()+[site.getusersitepackages()]) for p in glob.glob(os.path.join(r,'nvidia','*','lib'))+glob.glob(os.path.join(r,'tensorrt_libs'))]; open('/etc/ld.so.conf.d/cuda-trt-libs.conf','w').write('\n'.join(dirs)+'\n')" \
     && ldconfig
@@ -76,15 +67,13 @@ RUN --device=nvidia.com/gpu=all \
       export LD_LIBRARY_PATH="$(dirname "$(find / -name 'libcuda.so*' 2>/dev/null | head -n1)"):${LD_LIBRARY_PATH}" && \
       mkdir -p /build/artifacts && \
       python scripts/export_onnx.py --model-name "$MODEL_NAME" --output "$ONNX_MODEL_PATH" --max-length "$MAX_SEQ" && \
-      python scripts/build_trt_engine.py --onnx "$ONNX_MODEL_PATH" --output "$TRT_ENGINE_PATH" --opt-batch "$INFERENCE_BATCH_SIZE" --max-batch "$INFERENCE_BATCH_SIZE" --max-seq "$MAX_SEQ" --fp16 $([ "$TRT_LEAN" = "1" ] && echo --version-compatible) && \
+      python scripts/build_trt_engine.py --onnx "$ONNX_MODEL_PATH" --output "$TRT_ENGINE_PATH" --opt-batch "$INFERENCE_BATCH_SIZE" --max-batch "$INFERENCE_BATCH_SIZE" --max-seq "$MAX_SEQ" --fp16 && \
       python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('$MODEL_NAME').backend_tokenizer.save('$TOKENIZER_OUT')" && \
       rm -f "$ONNX_MODEL_PATH"; \
     fi
 
 # ============================== 2. rust-builder ==============================
 FROM ${TRT_IMAGE} AS rust-builder
-ARG TRT_LEAN
-ENV TRT_LEAN=${TRT_LEAN}
 WORKDIR /src
 
 ENV PATH=/root/.cargo/bin:$PATH
@@ -113,7 +102,6 @@ ARG MODEL_NAME
 ARG INFERENCE_BATCH_SIZE
 ARG MAX_BATCH_TOKENS
 ARG MAX_SEQ
-ARG TRT_LEAN
 WORKDIR /opt/program
 
 ENV PYTHONUNBUFFERED=1 \
@@ -144,15 +132,8 @@ COPY --from=rust-builder /usr/local/bin/sentiment-service-rs /usr/local/bin/sent
 COPY --from=engine-builder /build/artifacts/model.plan /opt/program/artifacts/model.plan
 COPY --from=engine-builder /build/artifacts/tokenizer.json /opt/program/artifacts/tokenizer.json
 
-# Keep only the runtime the binary links: full libnvinfer (default) OR libnvinfer_lean
-# (TRT_LEAN=1). Always drop the build-only tactic DB, ONNX parser, dispatch shim, vc plugin.
 RUN cd /opt/program/libs/tensorrt_libs \
-    && rm -f libnvinfer_builder_resource* libnvonnxparser* libnvinfer_dispatch* libnvinfer_vc_plugin* 2>/dev/null || true \
-    && if [ "$TRT_LEAN" = "1" ]; then \
-         rm -f libnvinfer.so* libnvinfer_plugin* 2>/dev/null || true; \
-       else \
-         rm -f libnvinfer_lean.so* 2>/dev/null || true; \
-       fi; \
+    && rm -f libnvinfer_builder_resource* libnvonnxparser* libnvinfer_lean* libnvinfer_dispatch* libnvinfer_vc_plugin* 2>/dev/null || true; \
     { for d in /opt/program/libs/tensorrt_libs /opt/program/libs/cublas /opt/program/libs/cuda_runtime; do echo "$d"; done; } > /etc/ld.so.conf.d/trt.conf \
     && ldconfig \
     && missing="$(ldd /usr/local/bin/sentiment-service-rs | grep 'not found' | grep -vE 'libcuda|libnvidia' || true)" \

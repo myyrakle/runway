@@ -23,6 +23,7 @@ pub struct AbsaTokenizer {
     inner: Tokenizer,
 }
 
+
 impl AbsaTokenizer {
     pub fn load(path: &str, max_length: usize, pad_to_multiple_of: usize) -> Result<Self> {
         let mut inner = Tokenizer::from_file(path)

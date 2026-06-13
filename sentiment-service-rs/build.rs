@@ -40,15 +40,7 @@ fn main() {
         }
     }
 
-    // Prefer the lean runtime if present (inference-only, no builder). Fall back to
-    // the full nvinfer otherwise. The actual choice is driven by what the runtime
-    // image ships; we emit the lean lib name and the Dockerfile guarantees it exists.
-    let lean = std::env::var("TRT_LEAN").map(|v| v == "1").unwrap_or(false);
-    if lean {
-        println!("cargo:rustc-link-lib=dylib=nvinfer_lean");
-    } else {
-        println!("cargo:rustc-link-lib=dylib=nvinfer");
-    }
+    println!("cargo:rustc-link-lib=dylib=nvinfer");
     println!("cargo:rustc-link-lib=dylib=cudart");
     println!("cargo:rustc-link-lib=dylib=stdc++");
 
@@ -56,6 +48,5 @@ fn main() {
     println!("cargo:rerun-if-changed=cpp/trt_shim.h");
     println!("cargo:rerun-if-env-changed=CUDA_PATH");
     println!("cargo:rerun-if-env-changed=TENSORRT_DIR");
-    println!("cargo:rerun-if-env-changed=TRT_LEAN");
     println!("cargo:rerun-if-env-changed=TRT_LINK_SEARCH");
 }

@@ -15,16 +15,11 @@ TOKENIZER            ?= artifacts/tokenizer.json
 # baked kernels / inference speed match. TRT_IMAGE only supplies headers+toolchain to
 # compile the shim; CUDA_RUNTIME_IMAGE supplies cudart/glibc (same Ubuntu as TRT_IMAGE).
 TENSORRT_PIP         ?= tensorrt-cu12==10.16.1.11
-TENSORRT_LEAN_PIP    ?= tensorrt-lean-cu12==10.16.1.11
 TRT_IMAGE            ?= nvcr.io/nvidia/tensorrt:25.05-py3
 CUDA_RUNTIME_IMAGE   ?= nvidia/cuda:12.8.0-base-ubuntu24.04
 # Forward-compat image (old-driver hosts, e.g. R470/ml.g4dn): see docker/Dockerfile.fwdcompat
 IMAGE_FWDCOMPAT      ?= sentiment-rs:trt-fwdcompat
 CUDA_COMPAT_IMAGE    ?= nvidia/cuda:12.8.0-base-ubuntu24.04
-# Lean runtime image (libnvinfer_lean instead of full libnvinfer — smaller). TRT_LEAN=1
-# also makes docker-build itself produce a lean image.
-TRT_LEAN             ?= 0
-IMAGE_LEAN           ?= sentiment-rs:trt-lean
 ENGINE               ?= artifacts/model.plan
 
 .DEFAULT_GOAL := help
@@ -45,8 +40,6 @@ help:
 	@echo "  make docker-run             run $(IMAGE) with --gpus all on :$(PORT)"
 	@echo "  make docker-build-fwdcompat old-driver (R470/g4dn) variant -> $(IMAGE_FWDCOMPAT)"
 	@echo "  make docker-run-fwdcompat   run the fwdcompat image"
-	@echo "  make docker-build-lean      lean TRT runtime (smaller) -> $(IMAGE_LEAN)"
-	@echo "  make docker-run-lean        run the lean image"
 
 # ---------------- local: CPU stub (no GPU/TensorRT) ----------------
 .PHONY: check build fmt clippy test clean
@@ -85,29 +78,22 @@ run-trt:
 	cargo run --release --features trt
 
 # ---------------- docker (self-contained; context = this directory) ----------------
-.PHONY: docker-build docker-build-fwdcompat docker-build-lean docker-run docker-run-fwdcompat docker-run-lean
+.PHONY: docker-build docker-build-fwdcompat docker-run docker-run-fwdcompat
 docker-build:
 	docker buildx build --allow device=nvidia.com/gpu=all \
 	  --build-arg TENSORRT_PIP=$(TENSORRT_PIP) \
-	  --build-arg TENSORRT_LEAN_PIP=$(TENSORRT_LEAN_PIP) \
 	  --build-arg TRT_IMAGE=$(TRT_IMAGE) \
 	  --build-arg CUDA_RUNTIME_IMAGE=$(CUDA_RUNTIME_IMAGE) \
 	  --build-arg MODEL_NAME=$(MODEL_NAME) \
 	  --build-arg INFERENCE_BATCH_SIZE=$(INFERENCE_BATCH_SIZE) \
 	  --build-arg MAX_SEQ=$(MAX_SEQ) \
 	  --build-arg MAX_BATCH_TOKENS=$(MAX_BATCH_TOKENS) \
-	  --build-arg TRT_LEAN=$(TRT_LEAN) \
 	  -f docker/Dockerfile -t $(IMAGE) --load .
-
-# Lean runtime variant: ships libnvinfer_lean (smaller) + version-compatible engine.
-docker-build-lean:
-	$(MAKE) docker-build TRT_LEAN=1 IMAGE=$(IMAGE_LEAN)
 
 # Old-driver hosts (R470 / SageMaker ml.g4dn): bakes CUDA forward-compat libcuda.
 docker-build-fwdcompat:
 	docker buildx build --allow device=nvidia.com/gpu=all \
 	  --build-arg TENSORRT_PIP=$(TENSORRT_PIP) \
-	  --build-arg TENSORRT_LEAN_PIP=$(TENSORRT_LEAN_PIP) \
 	  --build-arg TRT_IMAGE=$(TRT_IMAGE) \
 	  --build-arg CUDA_RUNTIME_IMAGE=$(CUDA_RUNTIME_IMAGE) \
 	  --build-arg CUDA_COMPAT_IMAGE=$(CUDA_COMPAT_IMAGE) \
@@ -115,11 +101,8 @@ docker-build-fwdcompat:
 	  --build-arg INFERENCE_BATCH_SIZE=$(INFERENCE_BATCH_SIZE) \
 	  --build-arg MAX_SEQ=$(MAX_SEQ) \
 	  --build-arg MAX_BATCH_TOKENS=$(MAX_BATCH_TOKENS) \
-	  --build-arg TRT_LEAN=$(TRT_LEAN) \
 	  -f docker/Dockerfile.fwdcompat -t $(IMAGE_FWDCOMPAT) --load .
 docker-run:
 	docker run --rm --gpus all -p $(PORT):8080 $(IMAGE)
 docker-run-fwdcompat:
 	docker run --rm --gpus all -p $(PORT):8080 $(IMAGE_FWDCOMPAT)
-docker-run-lean:
-	docker run --rm --gpus all -p $(PORT):8080 $(IMAGE_LEAN)
