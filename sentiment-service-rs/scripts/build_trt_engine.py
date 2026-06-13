@@ -16,6 +16,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-seq", type=int, default=512)
     parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--workspace-gb", type=float, default=4.0)
+    parser.add_argument(
+        "--version-compatible",
+        action="store_true",
+        help="Build a version-compatible engine loadable by the TensorRT LEAN runtime "
+        "(libnvinfer_lean.so), and EXCLUDE the embedded lean runtime from the plan so the "
+        "lean .so can be shipped externally (smaller image). May restrict tactics / cost "
+        "some speed vs a standard engine.",
+    )
     return parser.parse_args()
 
 
@@ -47,6 +55,13 @@ def main() -> None:
     )
     if args.fp16 and builder.platform_has_fast_fp16:
         config.set_flag(trt.BuilderFlag.FP16)
+
+    if args.version_compatible:
+        # VERSION_COMPATIBLE makes the engine loadable by the lean runtime;
+        # EXCLUDE_LEAN_RUNTIME keeps the lean runtime OUT of the plan (we ship the lean
+        # .so externally instead), so the plan stays small.
+        config.set_flag(trt.BuilderFlag.VERSION_COMPATIBLE)
+        config.set_flag(trt.BuilderFlag.EXCLUDE_LEAN_RUNTIME)
 
     profile = builder.create_optimization_profile()
     for i in range(network.num_inputs):

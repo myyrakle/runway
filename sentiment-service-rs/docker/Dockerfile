@@ -48,6 +48,12 @@ ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:12.8.0-base-ubuntu24.04
 ARG INFERENCE_BATCH_SIZE=32
 ARG MAX_SEQ=512
 ARG MAX_BATCH_TOKENS=16384
+# TRT_LEAN=1 ships the TensorRT LEAN runtime (libnvinfer_lean.so) instead of the full
+# libnvinfer (the single biggest .so) — smaller image. It requires a version-compatible
+# engine (the engine-builder adds --version-compatible) and links the shim against
+# nvinfer_lean (rust-builder sets TRT_LEAN for build.rs). Tradeoff: version-compatible
+# engines may use a restricted tactic set, so speed can differ from the full runtime.
+ARG TRT_LEAN=0
 
 # ============================== 1. engine-builder ==============================
 # Identical to the Python service's tensorrt builder: python:3.10-slim + pip torch +
@@ -60,6 +66,7 @@ ARG MODEL_NAME
 ARG INFERENCE_BATCH_SIZE
 ARG MAX_SEQ
 ARG TENSORRT_PIP
+ARG TRT_LEAN
 WORKDIR /build
 
 ENV PYTHONUNBUFFERED=1 \
@@ -93,7 +100,7 @@ RUN --device=nvidia.com/gpu=all \
       export LD_LIBRARY_PATH="$(dirname "$(find / -name 'libcuda.so*' 2>/dev/null | head -n1)"):${LD_LIBRARY_PATH}" && \
       mkdir -p /build/artifacts && \
       python scripts/export_onnx.py --model-name "$MODEL_NAME" --output "$ONNX_MODEL_PATH" --max-length "$MAX_SEQ" && \
-      python scripts/build_trt_engine.py --onnx "$ONNX_MODEL_PATH" --output "$TRT_ENGINE_PATH" --opt-batch "$INFERENCE_BATCH_SIZE" --max-batch "$INFERENCE_BATCH_SIZE" --max-seq "$MAX_SEQ" --fp16 && \
+      python scripts/build_trt_engine.py --onnx "$ONNX_MODEL_PATH" --output "$TRT_ENGINE_PATH" --opt-batch "$INFERENCE_BATCH_SIZE" --max-batch "$INFERENCE_BATCH_SIZE" --max-seq "$MAX_SEQ" --fp16 $([ "$TRT_LEAN" = "1" ] && echo --version-compatible) && \
       python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('$MODEL_NAME').backend_tokenizer.save('$TOKENIZER_OUT')" && \
       rm -f "$ONNX_MODEL_PATH"; \
     fi
@@ -101,6 +108,9 @@ RUN --device=nvidia.com/gpu=all \
 # ============================== 2. rust-builder ==============================
 # Build inside the TensorRT image so NvInfer.h + libnvinfer + CUDA are present.
 FROM ${TRT_IMAGE} AS rust-builder
+ARG TRT_LEAN
+# build.rs links nvinfer_lean instead of nvinfer when this is 1.
+ENV TRT_LEAN=${TRT_LEAN}
 WORKDIR /src
 
 # Rust toolchain (the TRT image is Ubuntu-based; rustup is the simplest install).
@@ -130,6 +140,7 @@ ARG MODEL_NAME
 ARG INFERENCE_BATCH_SIZE
 ARG MAX_BATCH_TOKENS
 ARG MAX_SEQ
+ARG TRT_LEAN
 WORKDIR /opt/program
 
 ENV PYTHONUNBUFFERED=1 \
@@ -164,8 +175,16 @@ COPY --from=engine-builder /build/artifacts/tokenizer.json /opt/program/artifact
 # the ONNX parser, and the lean/dispatch/vc alternative runtimes), register the copied
 # .so dirs, and fail the build if a NON-driver lib is unresolved (libcuda/libnvidia-* are
 # injected by --gpus at run time, so they're expected-missing here).
+# Keep only the runtime the binary links: full libnvinfer (default) OR the much smaller
+# libnvinfer_lean (TRT_LEAN=1). Always drop the build-only tactic DB, the ONNX parser,
+# the dispatch shim, and the vc plugin.
 RUN cd /opt/program/libs/tensorrt_libs \
-    && rm -f libnvinfer_builder_resource* libnvonnxparser* libnvinfer_lean* libnvinfer_dispatch* libnvinfer_vc_plugin* 2>/dev/null || true; \
+    && rm -f libnvinfer_builder_resource* libnvonnxparser* libnvinfer_dispatch* libnvinfer_vc_plugin* 2>/dev/null || true \
+    && if [ "$TRT_LEAN" = "1" ]; then \
+         rm -f libnvinfer.so* libnvinfer_plugin* 2>/dev/null || true; \
+       else \
+         rm -f libnvinfer_lean.so* 2>/dev/null || true; \
+       fi; \
     { for d in /opt/program/libs/tensorrt_libs /opt/program/libs/cublas /opt/program/libs/cuda_runtime; do echo "$d"; done; } > /etc/ld.so.conf.d/trt.conf \
     && ldconfig \
     && missing="$(ldd /usr/local/bin/sentiment-service-rs | grep 'not found' | grep -vE 'libcuda|libnvidia' || true)" \
