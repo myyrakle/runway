@@ -84,10 +84,34 @@ struct TrtEngine {
     size_t cap_mask = 0; // bytes
     size_t cap_out = 0;  // bytes
 
+    // Pinned host staging buffers. Pinned (page-locked) memory makes cudaMemcpyAsync
+    // a true async DMA instead of the synchronous bounce-through-staging path that
+    // pageable memory forces, and lets us reuse one allocation across calls instead
+    // of heap-allocating a std::vector every forward.
+    void *h_ids = nullptr;   // sized to in_bytes
+    void *h_mask = nullptr;  // sized to in_bytes
+    void *h_out = nullptr;   // sized to out_bytes (raw engine output dtype)
+    size_t cap_h_ids = 0;
+    size_t cap_h_mask = 0;
+    size_t cap_h_out = 0;
+
+    // Cache the last-bound shape + device addresses so we only call the (comparatively
+    // expensive) context setters when something actually changes. After warmup the
+    // device buffers stop growing, so setTensorAddress is then never called again and
+    // setInputShape only when the chunk's [batch, seq] differs.
+    int last_batch = -1;
+    int last_seq = -1;
+    void *bound_ids = nullptr;
+    void *bound_mask = nullptr;
+    void *bound_out = nullptr;
+
     ~TrtEngine() {
         if (d_ids) cudaFree(d_ids);
         if (d_mask) cudaFree(d_mask);
         if (d_out) cudaFree(d_out);
+        if (h_ids) cudaFreeHost(h_ids);
+        if (h_mask) cudaFreeHost(h_mask);
+        if (h_out) cudaFreeHost(h_out);
         if (stream) cudaStreamDestroy(stream);
         delete context;
         delete engine;
@@ -102,6 +126,20 @@ static bool ensure_capacity(void **buf, size_t *cap, size_t needed, std::string 
     cudaError_t st = cudaMalloc(buf, needed);
     if (st != cudaSuccess) {
         *err = std::string("cudaMalloc failed: ") + cudaGetErrorString(st);
+        *cap = 0;
+        return false;
+    }
+    *cap = needed;
+    return true;
+}
+
+static bool ensure_pinned(void **buf, size_t *cap, size_t needed, std::string *err) {
+    if (needed <= *cap) return true;
+    if (*buf) cudaFreeHost(*buf);
+    *buf = nullptr;
+    cudaError_t st = cudaHostAlloc(buf, needed, cudaHostAllocDefault);
+    if (st != cudaSuccess) {
+        *err = std::string("cudaHostAlloc failed: ") + cudaGetErrorString(st);
         *cap = 0;
         return false;
     }
@@ -218,67 +256,77 @@ extern "C" int trt_engine_infer(TrtEngine *h,
     const size_t out_count = (size_t)batch * (size_t)num_labels;
     const size_t out_bytes = out_count * out_elt;
 
-    // input_ids and attention_mask share the same [batch, seq] shape: one device
-    // slab each, grown on demand.
+    // Device slabs (input_ids/attention_mask share the [batch, seq] shape) + the
+    // pinned host staging buffers, all grown on demand and reused across calls.
     std::string e;
     if (!ensure_capacity(&h->d_ids, &h->cap_ids, in_bytes, &e)) return fail(e);
     if (!ensure_capacity(&h->d_mask, &h->cap_mask, in_bytes, &e)) return fail(e);
     if (!ensure_capacity(&h->d_out, &h->cap_out, out_bytes, &e)) return fail(e);
+    if (!ensure_pinned(&h->h_ids, &h->cap_h_ids, in_bytes, &e)) return fail(e);
+    if (!ensure_pinned(&h->h_mask, &h->cap_h_mask, in_bytes, &e)) return fail(e);
+    if (!ensure_pinned(&h->h_out, &h->cap_h_out, out_bytes, &e)) return fail(e);
 
-    // Host staging for dtype conversion (int32 -> engine input dtype).
-    std::vector<int64_t> ids64, mask64;
-    const void *ids_src;
-    const void *mask_src;
+    // Stage inputs into pinned memory, converting int32 -> engine input dtype in place.
     if (h->in_dtype == nvinfer1::DataType::kINT64) {
-        ids64.resize(count);
-        mask64.resize(count);
+        int64_t *ids = (int64_t *)h->h_ids;
+        int64_t *mask = (int64_t *)h->h_mask;
         for (size_t i = 0; i < count; i++) {
-            ids64[i] = (int64_t)input_ids[i];
-            mask64[i] = (int64_t)attention_mask[i];
+            ids[i] = (int64_t)input_ids[i];
+            mask[i] = (int64_t)attention_mask[i];
         }
-        ids_src = ids64.data();
-        mask_src = mask64.data();
-    } else { // treat as int32
-        ids_src = input_ids;
-        mask_src = attention_mask;
+    } else { // engine takes int32 directly
+        std::memcpy(h->h_ids, input_ids, in_bytes);
+        std::memcpy(h->h_mask, attention_mask, in_bytes);
     }
 
     cudaError_t st;
-    st = cudaMemcpyAsync(h->d_ids, ids_src, in_bytes, cudaMemcpyHostToDevice, h->stream);
+    st = cudaMemcpyAsync(h->d_ids, h->h_ids, in_bytes, cudaMemcpyHostToDevice, h->stream);
     if (st != cudaSuccess) return fail(std::string("H2D ids: ") + cudaGetErrorString(st));
-    st = cudaMemcpyAsync(h->d_mask, mask_src, in_bytes, cudaMemcpyHostToDevice, h->stream);
+    st = cudaMemcpyAsync(h->d_mask, h->h_mask, in_bytes, cudaMemcpyHostToDevice, h->stream);
     if (st != cudaSuccess) return fail(std::string("H2D mask: ") + cudaGetErrorString(st));
 
-    nvinfer1::Dims2 shape(batch, seq);
-    if (!h->context->setInputShape(h->in_ids_name.c_str(), shape))
-        return fail("setInputShape(input_ids) failed");
-    if (!h->context->setInputShape(h->in_mask_name.c_str(), shape))
-        return fail("setInputShape(attention_mask) failed");
+    // Only re-set the shape when this chunk's [batch, seq] differs from the last call.
+    if (batch != h->last_batch || seq != h->last_seq) {
+        nvinfer1::Dims2 shape(batch, seq);
+        if (!h->context->setInputShape(h->in_ids_name.c_str(), shape))
+            return fail("setInputShape(input_ids) failed");
+        if (!h->context->setInputShape(h->in_mask_name.c_str(), shape))
+            return fail("setInputShape(attention_mask) failed");
+        h->last_batch = batch;
+        h->last_seq = seq;
+    }
 
-    if (!h->context->setTensorAddress(h->in_ids_name.c_str(), h->d_ids))
-        return fail("setTensorAddress(input_ids) failed");
-    if (!h->context->setTensorAddress(h->in_mask_name.c_str(), h->d_mask))
-        return fail("setTensorAddress(attention_mask) failed");
-    if (!h->context->setTensorAddress(h->out_name.c_str(), h->d_out))
-        return fail("setTensorAddress(logits) failed");
+    // Only rebind a tensor address when its device buffer was (re)allocated. After the
+    // buffers reach their high-water mark this never fires again.
+    if (h->bound_ids != h->d_ids) {
+        if (!h->context->setTensorAddress(h->in_ids_name.c_str(), h->d_ids))
+            return fail("setTensorAddress(input_ids) failed");
+        h->bound_ids = h->d_ids;
+    }
+    if (h->bound_mask != h->d_mask) {
+        if (!h->context->setTensorAddress(h->in_mask_name.c_str(), h->d_mask))
+            return fail("setTensorAddress(attention_mask) failed");
+        h->bound_mask = h->d_mask;
+    }
+    if (h->bound_out != h->d_out) {
+        if (!h->context->setTensorAddress(h->out_name.c_str(), h->d_out))
+            return fail("setTensorAddress(logits) failed");
+        h->bound_out = h->d_out;
+    }
 
     if (!h->context->enqueueV3(h->stream))
         return fail("enqueueV3 failed");
 
-    // Download + convert to fp32.
+    // D2H into pinned memory, sync, then convert to fp32 for the caller.
+    st = cudaMemcpyAsync(h->h_out, h->d_out, out_bytes, cudaMemcpyDeviceToHost, h->stream);
+    if (st != cudaSuccess) return fail(std::string("D2H logits: ") + cudaGetErrorString(st));
+    st = cudaStreamSynchronize(h->stream);
+    if (st != cudaSuccess) return fail(std::string("stream sync: ") + cudaGetErrorString(st));
+
     if (h->out_dtype == nvinfer1::DataType::kFLOAT) {
-        st = cudaMemcpyAsync(out_logits, h->d_out, out_bytes, cudaMemcpyDeviceToHost,
-                             h->stream);
-        if (st != cudaSuccess) return fail(std::string("D2H logits: ") + cudaGetErrorString(st));
-        st = cudaStreamSynchronize(h->stream);
-        if (st != cudaSuccess) return fail(std::string("stream sync: ") + cudaGetErrorString(st));
+        std::memcpy(out_logits, h->h_out, out_bytes);
     } else if (h->out_dtype == nvinfer1::DataType::kHALF) {
-        std::vector<uint16_t> half(out_count);
-        st = cudaMemcpyAsync(half.data(), h->d_out, out_bytes, cudaMemcpyDeviceToHost,
-                             h->stream);
-        if (st != cudaSuccess) return fail(std::string("D2H logits(half): ") + cudaGetErrorString(st));
-        st = cudaStreamSynchronize(h->stream);
-        if (st != cudaSuccess) return fail(std::string("stream sync: ") + cudaGetErrorString(st));
+        const uint16_t *half = (const uint16_t *)h->h_out;
         for (size_t i = 0; i < out_count; i++) out_logits[i] = half_to_float(half[i]);
     } else {
         return fail("unsupported logits output dtype");

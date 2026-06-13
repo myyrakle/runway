@@ -1,6 +1,9 @@
 //! Inference orchestration: batching + chunking + softmax + result assembly.
 //! Ports app/model.py's analyze_batch / _iter_inference_chunks / _analyze_batch_chunk.
 
+use std::sync::OnceLock;
+use std::time::Instant;
+
 use anyhow::Result;
 
 use crate::config::Config;
@@ -9,6 +12,17 @@ use crate::schemas::{Probs, SentimentResult};
 use crate::tokenizer::AbsaTokenizer;
 
 const LABELS: [&str; 3] = ["negative", "neutral", "positive"];
+
+/// Set SENTIMENT_TIMING=1 to log a per-request tokenize-vs-forward breakdown. Off by
+/// default (one env read, cached) so it costs nothing in production.
+fn timing_enabled() -> bool {
+    static FLAG: OnceLock<bool> = OnceLock::new();
+    *FLAG.get_or_init(|| {
+        std::env::var("SENTIMENT_TIMING")
+            .map(|v| !matches!(v.as_str(), "" | "0" | "false" | "no"))
+            .unwrap_or(false)
+    })
+}
 
 pub struct Engine {
     pub config: Config,
@@ -51,12 +65,29 @@ impl Engine {
 
         let mut ordered: Vec<Option<SentimentResult>> = (0..texts.len()).map(|_| None).collect();
 
+        let timing = timing_enabled();
+        let (mut tok_ms, mut fwd_ms) = (0.0_f64, 0.0_f64);
+        let mut chunks_run = 0usize;
+
         for chunk in self.iter_chunks(&indexed, aspect) {
             let chunk_texts: Vec<String> = chunk.iter().map(|(_, t)| (*t).clone()).collect();
-            let chunk_results = self.run_chunk(&chunk_texts, aspect)?;
+            let (chunk_results, t_ms, f_ms) = self.run_chunk(&chunk_texts, aspect)?;
+            tok_ms += t_ms;
+            fwd_ms += f_ms;
+            chunks_run += 1;
             for ((orig_idx, _), result) in chunk.iter().zip(chunk_results.into_iter()) {
                 ordered[*orig_idx] = Some(result);
             }
+        }
+
+        if timing {
+            tracing::info!(
+                texts = texts.len(),
+                chunks = chunks_run,
+                tokenize_ms = format!("{tok_ms:.1}"),
+                forward_ms = format!("{fwd_ms:.1}"),
+                "analyze_batch timing"
+            );
         }
 
         Ok(ordered.into_iter().flatten().collect())
@@ -110,11 +141,17 @@ impl Engine {
     }
 
     /// One bounded forward pass: tokenize → backend infer → softmax → results.
-    fn run_chunk(&self, texts: &[String], aspect: &str) -> Result<Vec<SentimentResult>> {
+    /// Returns (results, tokenize_ms, forward_ms) for optional timing instrumentation.
+    fn run_chunk(&self, texts: &[String], aspect: &str) -> Result<(Vec<SentimentResult>, f64, f64)> {
+        let t0 = Instant::now();
         let enc = self.tokenizer.encode_pairs(texts, aspect)?;
+        let tokenize_ms = t0.elapsed().as_secs_f64() * 1000.0;
+
+        let t1 = Instant::now();
         let logits = self
             .backend
             .infer(&enc.input_ids, &enc.attention_mask, enc.batch, enc.seq)?;
+        let forward_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
         let num_labels = self.backend.num_labels();
         let threshold = self.config.negative_threshold;
@@ -149,7 +186,7 @@ impl Engine {
                 },
             });
         }
-        Ok(results)
+        Ok((results, tokenize_ms, forward_ms))
     }
 }
 
