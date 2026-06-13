@@ -1,0 +1,143 @@
+# syntax=docker/dockerfile:1-labs
+# Forward-compatible variant of docker/Dockerfile (same 3-stage build) for OLD-DRIVER
+# hosts. The cu128 TensorRT runtime needs a CUDA 12.x-capable driver, but some hosts
+# (e.g. SageMaker ml.g4dn = T4 + R470 = "CUDA 11.4") ship an old driver and the plain
+# image dies at startup with `createInferRuntime ... CUDA error 35` / "driver too old".
+# This variant bakes NVIDIA CUDA Forward Compatibility (the cuda-compat-12-8 userspace
+# libcuda) into the runtime and puts it FIRST on LD_LIBRARY_PATH, so the cu128 runtime
+# runs on top of the old kernel driver.
+#
+# CONSTRAINTS — read before building:
+#   1. Forward compat only works on DATA-CENTER (Tesla) GPUs. T4 qualifies. R470 is the
+#      minimum forward-compat base driver for CUDA 12.x, so that is the edge of support.
+#   2. Forward compat fixes the DRIVER mismatch only — it does NOT change the engine's
+#      GPU-architecture lock. The .plan is built ON the engine-builder's GPU, so this
+#      image MUST be built on the SAME arch as the inference host (e.g. build on a T4/sm75
+#      to target ml.g4dn). On a host whose driver is already new enough, the compat libs
+#      are simply unused.
+#
+# Build (CDI GPU into the engine step, same as the plain image):
+#   cd sentiment-service-rs
+#   docker buildx build --allow device=nvidia.com/gpu=all \
+#     -f docker/Dockerfile.fwdcompat -t sentiment-rs:trt-fwdcompat --load .
+# (or `make docker-build-fwdcompat`)
+
+ARG MODEL_NAME=yangheng/deberta-v3-base-absa-v1.1
+ARG TENSORRT_PIP=tensorrt-cu12==10.16.1.11
+ARG TRT_IMAGE=nvcr.io/nvidia/tensorrt:25.05-py3
+ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:12.8.0-base-ubuntu24.04
+# Image to grab the forward-compat userspace libcuda from. Its CUDA version must match
+# the cu128 wheels (forward compat is keyed to the toolkit version). Keep the Ubuntu in
+# step with CUDA_RUNTIME_IMAGE.
+ARG CUDA_COMPAT_IMAGE=nvidia/cuda:12.8.0-base-ubuntu24.04
+ARG INFERENCE_BATCH_SIZE=32
+ARG MAX_SEQ=512
+ARG MAX_BATCH_TOKENS=16384
+
+# ============================== 1. engine-builder ==============================
+FROM python:3.10-slim AS engine-builder
+ARG MODEL_NAME
+ARG INFERENCE_BATCH_SIZE
+ARG MAX_SEQ
+ARG TENSORRT_PIP
+WORKDIR /build
+
+ENV PYTHONUNBUFFERED=1 \
+    HF_HOME=/build/.cache/huggingface \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    ONNX_MODEL_PATH=/build/artifacts/model.onnx \
+    TRT_ENGINE_PATH=/build/artifacts/model.plan \
+    TOKENIZER_OUT=/build/artifacts/tokenizer.json
+
+RUN python -m pip install --no-cache-dir --upgrade pip \
+    && python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
+
+COPY scripts ./scripts
+RUN python -m pip install --no-cache-dir -r scripts/requirements-build.txt \
+    && python -m pip install --no-cache-dir "${TENSORRT_PIP}"
+
+RUN python -c "import glob,os,site; dirs=[p for r in (site.getsitepackages()+[site.getusersitepackages()]) for p in glob.glob(os.path.join(r,'nvidia','*','lib'))+glob.glob(os.path.join(r,'tensorrt_libs'))]; open('/etc/ld.so.conf.d/cuda-trt-libs.conf','w').write('\n'.join(dirs)+'\n')" \
+    && ldconfig
+
+ARG BUILD_ENGINE=1
+RUN --device=nvidia.com/gpu=all \
+    if [ "$BUILD_ENGINE" = "1" ]; then \
+      ldconfig && \
+      export LD_LIBRARY_PATH="$(dirname "$(find / -name 'libcuda.so*' 2>/dev/null | head -n1)"):${LD_LIBRARY_PATH}" && \
+      mkdir -p /build/artifacts && \
+      python scripts/export_onnx.py --model-name "$MODEL_NAME" --output "$ONNX_MODEL_PATH" --max-length "$MAX_SEQ" && \
+      python scripts/build_trt_engine.py --onnx "$ONNX_MODEL_PATH" --output "$TRT_ENGINE_PATH" --opt-batch "$INFERENCE_BATCH_SIZE" --max-batch "$INFERENCE_BATCH_SIZE" --max-seq "$MAX_SEQ" --fp16 && \
+      python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('$MODEL_NAME').backend_tokenizer.save('$TOKENIZER_OUT')" && \
+      rm -f "$ONNX_MODEL_PATH"; \
+    fi
+
+# ============================== 2. rust-builder ==============================
+FROM ${TRT_IMAGE} AS rust-builder
+WORKDIR /src
+
+ENV PATH=/root/.cargo/bin:$PATH
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates build-essential \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV CUDA_PATH=/usr/local/cuda \
+    TENSORRT_DIR=/usr
+
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY cpp ./cpp
+COPY src ./src
+RUN cargo build --release --features trt \
+    && cp target/release/sentiment-service-rs /usr/local/bin/sentiment-service-rs \
+    && strip /usr/local/bin/sentiment-service-rs || true
+
+# ===== forward-compat libs (the ONLY difference from docker/Dockerfile) =====
+# The cuda-compat package ships the forward-compatible userspace libcuda under
+# /usr/local/cuda/compat in NVIDIA's base images. We grab just that dir.
+FROM ${CUDA_COMPAT_IMAGE} AS cudacompat
+
+# ============================== 3. runtime ==============================
+FROM ${CUDA_RUNTIME_IMAGE} AS runtime
+ARG MODEL_NAME
+ARG INFERENCE_BATCH_SIZE
+ARG MAX_BATCH_TOKENS
+ARG MAX_SEQ
+WORKDIR /opt/program
+
+ENV PYTHONUNBUFFERED=1 \
+    PORT=8080 \
+    MODEL_NAME=${MODEL_NAME} \
+    TRT_ENGINE_PATH=/opt/program/artifacts/model.plan \
+    TOKENIZER_PATH=/opt/program/artifacts/tokenizer.json \
+    INFERENCE_BATCH_SIZE=${INFERENCE_BATCH_SIZE} \
+    MAX_BATCH_TOKENS=${MAX_BATCH_TOKENS} \
+    MAX_LENGTH=${MAX_SEQ} \
+    PAD_TO_MULTIPLE_OF=8 \
+    RUST_LOG=info
+
+# Forward-compat libcuda, placed FIRST on LD_LIBRARY_PATH so libnvinfer/cudart load this
+# CUDA-12.8-capable libcuda instead of the old host libcuda the nvidia runtime injects
+# into the default loader dirs. This is what lets cu128 run on an R470 host. On a host
+# whose driver is already new enough it is simply unused. (${LD_LIBRARY_PATH} expands the
+# base image's value so the injected /usr/local/nvidia/lib* dirs are preserved.)
+COPY --from=cudacompat /usr/local/cuda/compat /opt/nvidia/cuda-compat
+ENV LD_LIBRARY_PATH=/opt/nvidia/cuda-compat:${LD_LIBRARY_PATH}
+
+# Inference-only .so set (see docker/Dockerfile for the rationale; cuDNN omitted).
+COPY --from=engine-builder /usr/local/lib/python3.10/site-packages/tensorrt_libs /opt/program/libs/tensorrt_libs
+COPY --from=engine-builder /usr/local/lib/python3.10/site-packages/nvidia/cublas/lib /opt/program/libs/cublas
+COPY --from=engine-builder /usr/local/lib/python3.10/site-packages/nvidia/cuda_runtime/lib /opt/program/libs/cuda_runtime
+COPY --from=engine-builder /usr/local/lib/python3.10/site-packages/nvidia/cuda_nvrtc/lib /opt/program/libs/cuda_nvrtc
+COPY --from=rust-builder /usr/local/bin/sentiment-service-rs /usr/local/bin/sentiment-service-rs
+COPY --from=engine-builder /build/artifacts/model.plan /opt/program/artifacts/model.plan
+COPY --from=engine-builder /build/artifacts/tokenizer.json /opt/program/artifacts/tokenizer.json
+
+RUN cd /opt/program/libs/tensorrt_libs \
+    && rm -f libnvinfer_builder_resource* libnvonnxparser* libnvinfer_lean* libnvinfer_dispatch* libnvinfer_vc_plugin* 2>/dev/null || true; \
+    { for d in /opt/program/libs/tensorrt_libs /opt/program/libs/cublas /opt/program/libs/cuda_runtime /opt/program/libs/cuda_nvrtc; do echo "$d"; done; } > /etc/ld.so.conf.d/trt.conf \
+    && ldconfig \
+    && missing="$(ldd /usr/local/bin/sentiment-service-rs | grep 'not found' | grep -vE 'libcuda|libnvidia' || true)" \
+    && if [ -n "$missing" ]; then echo "MISSING NON-DRIVER LIBS:"; echo "$missing"; exit 1; fi
+
+EXPOSE 8080
+CMD ["sentiment-service-rs"]

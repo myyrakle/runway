@@ -17,6 +17,9 @@ TOKENIZER            ?= artifacts/tokenizer.json
 TENSORRT_PIP         ?= tensorrt-cu12==10.16.1.11
 TRT_IMAGE            ?= nvcr.io/nvidia/tensorrt:25.05-py3
 CUDA_RUNTIME_IMAGE   ?= nvidia/cuda:12.8.0-base-ubuntu24.04
+# Forward-compat image (old-driver hosts, e.g. R470/ml.g4dn): see docker/Dockerfile.fwdcompat
+IMAGE_FWDCOMPAT      ?= sentiment-rs:trt-fwdcompat
+CUDA_COMPAT_IMAGE    ?= nvidia/cuda:12.8.0-base-ubuntu24.04
 ENGINE               ?= artifacts/model.plan
 
 .DEFAULT_GOAL := help
@@ -33,8 +36,10 @@ help:
 	@echo "  make build-trt    cargo build --release --features trt"
 	@echo "  make run-trt      run the real TensorRT server (needs $(ENGINE) + $(TOKENIZER))"
 	@echo "docker (self-contained; context = this dir):"
-	@echo "  make docker-build multi-stage GPU build -> $(IMAGE)"
-	@echo "  make docker-run   run $(IMAGE) with --gpus all on :$(PORT)"
+	@echo "  make docker-build           multi-stage GPU build -> $(IMAGE)"
+	@echo "  make docker-run             run $(IMAGE) with --gpus all on :$(PORT)"
+	@echo "  make docker-build-fwdcompat old-driver (R470/g4dn) variant -> $(IMAGE_FWDCOMPAT)"
+	@echo "  make docker-run-fwdcompat   run the fwdcompat image"
 
 # ---------------- local: CPU stub (no GPU/TensorRT) ----------------
 .PHONY: check build fmt clippy test clean
@@ -73,7 +78,7 @@ run-trt:
 	cargo run --release --features trt
 
 # ---------------- docker (self-contained; context = this directory) ----------------
-.PHONY: docker-build docker-run
+.PHONY: docker-build docker-build-fwdcompat docker-run docker-run-fwdcompat
 docker-build:
 	docker buildx build --allow device=nvidia.com/gpu=all \
 	  --build-arg TENSORRT_PIP=$(TENSORRT_PIP) \
@@ -84,5 +89,20 @@ docker-build:
 	  --build-arg MAX_SEQ=$(MAX_SEQ) \
 	  --build-arg MAX_BATCH_TOKENS=$(MAX_BATCH_TOKENS) \
 	  -f docker/Dockerfile -t $(IMAGE) --load .
+
+# Old-driver hosts (R470 / SageMaker ml.g4dn): bakes CUDA forward-compat libcuda.
+docker-build-fwdcompat:
+	docker buildx build --allow device=nvidia.com/gpu=all \
+	  --build-arg TENSORRT_PIP=$(TENSORRT_PIP) \
+	  --build-arg TRT_IMAGE=$(TRT_IMAGE) \
+	  --build-arg CUDA_RUNTIME_IMAGE=$(CUDA_RUNTIME_IMAGE) \
+	  --build-arg CUDA_COMPAT_IMAGE=$(CUDA_COMPAT_IMAGE) \
+	  --build-arg MODEL_NAME=$(MODEL_NAME) \
+	  --build-arg INFERENCE_BATCH_SIZE=$(INFERENCE_BATCH_SIZE) \
+	  --build-arg MAX_SEQ=$(MAX_SEQ) \
+	  --build-arg MAX_BATCH_TOKENS=$(MAX_BATCH_TOKENS) \
+	  -f docker/Dockerfile.fwdcompat -t $(IMAGE_FWDCOMPAT) --load .
 docker-run:
 	docker run --rm --gpus all -p $(PORT):8080 $(IMAGE)
+docker-run-fwdcompat:
+	docker run --rm --gpus all -p $(PORT):8080 $(IMAGE_FWDCOMPAT)
