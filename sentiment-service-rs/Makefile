@@ -107,6 +107,7 @@ docker-build-lean:
 docker-build-fwdcompat:
 	docker buildx build --allow device=nvidia.com/gpu=all \
 	  --build-arg TENSORRT_PIP=$(TENSORRT_PIP) \
+	  --build-arg TENSORRT_LEAN_PIP=$(TENSORRT_LEAN_PIP) \
 	  --build-arg TRT_IMAGE=$(TRT_IMAGE) \
 	  --build-arg CUDA_RUNTIME_IMAGE=$(CUDA_RUNTIME_IMAGE) \
 	  --build-arg CUDA_COMPAT_IMAGE=$(CUDA_COMPAT_IMAGE) \
@@ -114,6 +115,7 @@ docker-build-fwdcompat:
 	  --build-arg INFERENCE_BATCH_SIZE=$(INFERENCE_BATCH_SIZE) \
 	  --build-arg MAX_SEQ=$(MAX_SEQ) \
 	  --build-arg MAX_BATCH_TOKENS=$(MAX_BATCH_TOKENS) \
+	  --build-arg TRT_LEAN=$(TRT_LEAN) \
 	  -f docker/Dockerfile.fwdcompat -t $(IMAGE_FWDCOMPAT) --load .
 docker-run:
 	docker run --rm --gpus all -p $(PORT):8080 $(IMAGE)
