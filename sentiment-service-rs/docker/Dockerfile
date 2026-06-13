@@ -25,17 +25,19 @@
 # host GPU and the inference GPU must match.
 
 ARG MODEL_NAME=yangheng/deberta-v3-base-absa-v1.1
-# TRT_IMAGE sets the TensorRT version for EVERYTHING: the engine is built with it, the
-# shim is compiled+linked against it, and the runtime libnvinfer is copied from it — so
-# they are always self-consistent. To match a Python deployment's inference speed, set
-# this to the nvcr tag whose bundled TensorRT EQUALS the Python image's
-# (`python -c "import tensorrt; print(tensorrt.__version__)"`). Different TRT versions
-# pick different kernels => different latency, even from the same ONNX.
+# TENSORRT_PIP sets the TensorRT VERSION that builds the engine AND that the runtime
+# loads it with — pinned to the EXACT pip wheel the Python service uses (see its
+# uv.lock: tensorrt-cu12 10.16.1.11) so the engine's baked kernels (=> inference speed)
+# match Python. Engine kernels are chosen at build time by this TRT version, so this is
+# the knob that matters for latency parity.
+ARG TENSORRT_PIP=tensorrt-cu12==10.16.1.11
+# TRT_IMAGE only provides the C++ headers (NvInfer.h) + CUDA + cargo toolchain to COMPILE
+# the shim in rust-builder. The shim uses only ABI-stable TensorRT 10.x API, so linking
+# against this image's TRT and running against TENSORRT_PIP's (same major 10) is safe.
 ARG TRT_IMAGE=nvcr.io/nvidia/tensorrt:25.05-py3
-# CUDA_RUNTIME_IMAGE must be glibc/CUDA-compatible with TRT_IMAGE: same Ubuntu (the Rust
-# binary is compiled against TRT_IMAGE's glibc) and a CUDA major.minor that the TRT_IMAGE
-# TensorRT supports. nvcr 25.x is Ubuntu 24.04 + CUDA 12.8; if you bump TRT_IMAGE to a
-# CUDA-13 nvcr tag, switch this to a matching nvidia/cuda:13.* base.
+# Runtime base: provides cudart/glibc. Must be the same Ubuntu as TRT_IMAGE (the Rust
+# binary is compiled against TRT_IMAGE's glibc — nvcr 25.x = Ubuntu 24.04). TensorRT's
+# own cuDNN/cuBLAS/cudart come from the TENSORRT_PIP wheel set copied into the image.
 ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04
 # Engine + chunking batch. INFERENCE_BATCH_SIZE is used for BOTH the engine's
 # opt/max batch (build) AND the runtime chunk size, so they always match. To serve a
@@ -46,17 +48,16 @@ ARG MAX_SEQ=512
 ARG MAX_BATCH_TOKENS=16384
 
 # ============================== 1. engine-builder ==============================
-# Mirrors sentiment-service's tensorrt build: fp32 ONNX export, TRT builds fp16.
-#
-# CRITICAL: build the engine with the SAME TensorRT that the runtime links, or
-# deserializeCudaEngine fails with a serialization-version mismatch. So this stage runs
-# on TRT_IMAGE (the same image rust-builder/runtime take libnvinfer from) and uses its
-# BUNDLED tensorrt — we deliberately do NOT pip-install tensorrt-cu12 (a different
-# version, and a 4.3GB wheel). We add only torch + transformers + onnx for the export.
-FROM ${TRT_IMAGE} AS engine-builder
+# Identical to the Python service's tensorrt builder: python:3.10-slim + pip torch +
+# pip TENSORRT_PIP. Building on the SAME pip TensorRT wheel as Python is what makes the
+# baked engine (and thus inference speed) match. Exports fp32 ONNX, TRT builds fp16,
+# then dumps a standalone tokenizer.json. Its pip TensorRT + CUDA libs are also what the
+# runtime stage serves with (copied below).
+FROM python:3.10-slim AS engine-builder
 ARG MODEL_NAME
 ARG INFERENCE_BATCH_SIZE
 ARG MAX_SEQ
+ARG TENSORRT_PIP
 WORKDIR /build
 
 ENV PYTHONUNBUFFERED=1 \
@@ -70,14 +71,14 @@ ENV PYTHONUNBUFFERED=1 \
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 
-# Vendored, self-contained export/build scripts + their Python deps (NOT tensorrt:
-# the image's bundled tensorrt is used so the engine matches the runtime libnvinfer).
+# Export deps (transformers/onnx/sentencepiece/...) + the pinned pip TensorRT (engine build).
 COPY scripts ./scripts
-RUN python -m pip install --no-cache-dir -r scripts/requirements-build.txt
+RUN python -m pip install --no-cache-dir -r scripts/requirements-build.txt \
+    && python -m pip install --no-cache-dir "${TENSORRT_PIP}"
 
-# Put torch's bundled CUDA libs on the loader path (the image's TensorRT libs are
-# already registered by the base image).
-RUN python -c "import glob,os,site; dirs=[p for r in (site.getsitepackages()+[site.getusersitepackages()]) for p in glob.glob(os.path.join(r,'nvidia','*','lib'))]; open('/etc/ld.so.conf.d/torch-cuda-libs.conf','w').write('\n'.join(dirs)+'\n')" \
+# torch's bundled CUDA libs + the pip tensorrt_libs on the loader path so the TRT builder
+# resolves its .so during the engine build.
+RUN python -c "import glob,os,site; dirs=[p for r in (site.getsitepackages()+[site.getusersitepackages()]) for p in glob.glob(os.path.join(r,'nvidia','*','lib'))+glob.glob(os.path.join(r,'tensorrt_libs'))]; open('/etc/ld.so.conf.d/cuda-trt-libs.conf','w').write('\n'.join(dirs)+'\n')" \
     && ldconfig
 
 ARG BUILD_ENGINE=1
@@ -113,16 +114,11 @@ ENV CUDA_PATH=/usr/local/cuda \
 COPY Cargo.toml Cargo.lock build.rs ./
 COPY cpp ./cpp
 COPY src ./src
-# Build the real TensorRT-linked binary.
+# Build the binary. It links against this image's libnvinfer (DT_NEEDED libnvinfer.so.10)
+# but RUNS against TENSORRT_PIP's libnvinfer.so.10 — ABI-compatible within TensorRT major 10.
 RUN cargo build --release --features trt \
     && cp target/release/sentiment-service-rs /usr/local/bin/sentiment-service-rs \
     && strip /usr/local/bin/sentiment-service-rs || true
-
-# Collect exactly the TensorRT runtime .so the binary needs (inference-only: nvinfer,
-# NOT the builder resource). Resolved from the binary's own NEEDED list.
-RUN mkdir -p /trt-libs \
-    && for so in $(ldd /usr/local/bin/sentiment-service-rs | awk '/libnvinfer/ {print $3}'); do cp -v "$so"* /trt-libs/ 2>/dev/null || true; done \
-    && cp -v /usr/lib/x86_64-linux-gnu/libnvinfer.so* /trt-libs/ 2>/dev/null || true
 
 # ============================== 3. runtime ==============================
 FROM ${CUDA_RUNTIME_IMAGE} AS runtime
@@ -145,14 +141,22 @@ ENV PYTHONUNBUFFERED=1 \
     PAD_TO_MULTIPLE_OF=8 \
     RUST_LOG=info
 
-# TensorRT runtime libs (from rust-builder) + the binary + artifacts.
-COPY --from=rust-builder /trt-libs/ /usr/local/lib/trt/
+# TensorRT 10.16 + the CUDA libs it links (cuDNN/cuBLAS/cudart), taken from the
+# engine-builder's pip install — the SAME .so set Python serves with, so the engine
+# loads against the exact TRT version that built it. The Rust binary comes from
+# rust-builder; the engine + tokenizer from engine-builder.
+COPY --from=engine-builder /usr/local/lib/python3.10/site-packages/tensorrt_libs /opt/program/libs/tensorrt_libs
+COPY --from=engine-builder /usr/local/lib/python3.10/site-packages/nvidia /opt/program/libs/nvidia
 COPY --from=rust-builder /usr/local/bin/sentiment-service-rs /usr/local/bin/sentiment-service-rs
 COPY --from=engine-builder /build/artifacts/model.plan /opt/program/artifacts/model.plan
 COPY --from=engine-builder /build/artifacts/tokenizer.json /opt/program/artifacts/tokenizer.json
 
-# Register the TRT libs with the loader.
-RUN echo "/usr/local/lib/trt" > /etc/ld.so.conf.d/trt.conf && ldconfig
+# Drop the build-only TRT tactic DB (~1GB, never used for inference), then register the
+# copied .so dirs with the loader.
+RUN find /opt/program/libs -name 'libnvinfer_builder_resource*' -delete 2>/dev/null || true; \
+    { echo /opt/program/libs/tensorrt_libs; for d in /opt/program/libs/nvidia/*/lib; do [ -d "$d" ] && echo "$d"; done; } > /etc/ld.so.conf.d/trt.conf \
+    && ldconfig \
+    && ldd /usr/local/bin/sentiment-service-rs | (grep -q 'not found' && { echo 'MISSING SHARED LIBS:'; ldd /usr/local/bin/sentiment-service-rs | grep 'not found'; exit 1; } || true)
 
 EXPOSE 8080
 CMD ["sentiment-service-rs"]

@@ -10,10 +10,11 @@ MAX_SEQ              ?= 512
 MAX_BATCH_TOKENS     ?= 16384
 PORT                 ?= 8080
 TOKENIZER            ?= artifacts/tokenizer.json
-# TensorRT version is set by these two images (must stay glibc/CUDA-compatible with
-# each other). Match TRT_IMAGE's bundled TensorRT to your Python deployment's version
-# so the engine kernels match. Verify with:
-#   docker run --rm $(TRT_IMAGE) python -c "import tensorrt; print(tensorrt.__version__)"
+# TENSORRT_PIP pins the TensorRT version that builds AND serves the engine — set to the
+# SAME pip wheel as the Python deployment (its uv.lock: tensorrt-cu12 10.16.1.11) so the
+# baked kernels / inference speed match. TRT_IMAGE only supplies headers+toolchain to
+# compile the shim; CUDA_RUNTIME_IMAGE supplies cudart/glibc (same Ubuntu as TRT_IMAGE).
+TENSORRT_PIP         ?= tensorrt-cu12==10.16.1.11
 TRT_IMAGE            ?= nvcr.io/nvidia/tensorrt:25.05-py3
 CUDA_RUNTIME_IMAGE   ?= nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04
 ENGINE               ?= artifacts/model.plan
@@ -75,6 +76,7 @@ run-trt:
 .PHONY: docker-build docker-run
 docker-build:
 	docker buildx build --allow device=nvidia.com/gpu=all \
+	  --build-arg TENSORRT_PIP=$(TENSORRT_PIP) \
 	  --build-arg TRT_IMAGE=$(TRT_IMAGE) \
 	  --build-arg CUDA_RUNTIME_IMAGE=$(CUDA_RUNTIME_IMAGE) \
 	  --build-arg MODEL_NAME=$(MODEL_NAME) \
