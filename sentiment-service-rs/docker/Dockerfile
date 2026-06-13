@@ -31,6 +31,10 @@ ARG MODEL_NAME=yangheng/deberta-v3-base-absa-v1.1
 # match Python. Engine kernels are chosen at build time by this TRT version, so this is
 # the knob that matters for latency parity.
 ARG TENSORRT_PIP=tensorrt-cu12==10.16.1.11
+# Lean runtime libs live in a SEPARATE pip package (the full tensorrt-cu12-libs wheel
+# does not ship libnvinfer_lean.so). Only installed/used when TRT_LEAN=1; keep the
+# version in lock-step with TENSORRT_PIP so the lean runtime matches the engine.
+ARG TENSORRT_LEAN_PIP=tensorrt-lean-cu12==10.16.1.11
 # TRT_IMAGE only provides the C++ headers (NvInfer.h) + CUDA + cargo toolchain to COMPILE
 # the shim in rust-builder. The shim uses only ABI-stable TensorRT 10.x API, so linking
 # against this image's TRT and running against TENSORRT_PIP's (same major 10) is safe.
@@ -66,6 +70,7 @@ ARG MODEL_NAME
 ARG INFERENCE_BATCH_SIZE
 ARG MAX_SEQ
 ARG TENSORRT_PIP
+ARG TENSORRT_LEAN_PIP
 ARG TRT_LEAN
 WORKDIR /build
 
@@ -81,9 +86,15 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 
 # Export deps (transformers/onnx/sentencepiece/...) + the pinned pip TensorRT (engine build).
+# For TRT_LEAN, also install the separate lean-runtime wheel and drop its libnvinfer_lean.so
+# into tensorrt_libs so the runtime stage's single tensorrt_libs copy picks it up.
 COPY scripts ./scripts
 RUN python -m pip install --no-cache-dir -r scripts/requirements-build.txt \
-    && python -m pip install --no-cache-dir "${TENSORRT_PIP}"
+    && python -m pip install --no-cache-dir "${TENSORRT_PIP}" \
+    && if [ "$TRT_LEAN" = "1" ]; then \
+         python -m pip install --no-cache-dir "${TENSORRT_LEAN_PIP}" \
+         && python -c "import glob,os,shutil,site; sp=site.getsitepackages()[0]; dst=os.path.join(sp,'tensorrt_libs'); [shutil.copy(p,dst) for p in glob.glob(os.path.join(sp,'**','libnvinfer_lean.so*'),recursive=True)]; print('lean libs ->', os.listdir(dst))"; \
+       fi
 
 # torch's bundled CUDA libs + the pip tensorrt_libs on the loader path so the TRT builder
 # resolves its .so during the engine build.

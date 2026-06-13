@@ -15,6 +15,7 @@ TOKENIZER            ?= artifacts/tokenizer.json
 # baked kernels / inference speed match. TRT_IMAGE only supplies headers+toolchain to
 # compile the shim; CUDA_RUNTIME_IMAGE supplies cudart/glibc (same Ubuntu as TRT_IMAGE).
 TENSORRT_PIP         ?= tensorrt-cu12==10.16.1.11
+TENSORRT_LEAN_PIP    ?= tensorrt-lean-cu12==10.16.1.11
 TRT_IMAGE            ?= nvcr.io/nvidia/tensorrt:25.05-py3
 CUDA_RUNTIME_IMAGE   ?= nvidia/cuda:12.8.0-base-ubuntu24.04
 # Forward-compat image (old-driver hosts, e.g. R470/ml.g4dn): see docker/Dockerfile.fwdcompat
@@ -88,6 +89,7 @@ run-trt:
 docker-build:
 	docker buildx build --allow device=nvidia.com/gpu=all \
 	  --build-arg TENSORRT_PIP=$(TENSORRT_PIP) \
+	  --build-arg TENSORRT_LEAN_PIP=$(TENSORRT_LEAN_PIP) \
 	  --build-arg TRT_IMAGE=$(TRT_IMAGE) \
 	  --build-arg CUDA_RUNTIME_IMAGE=$(CUDA_RUNTIME_IMAGE) \
 	  --build-arg MODEL_NAME=$(MODEL_NAME) \
