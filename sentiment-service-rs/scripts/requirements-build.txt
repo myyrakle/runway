@@ -1,0 +1,8 @@
+# Python deps for the engine-build stage ONLY (export ONNX + dump tokenizer.json).
+# torch is installed separately from the CUDA 12.8 wheel index; tensorrt comes from
+# the TensorRT base image. None of this ships in the runtime image.
+transformers>=4.44.0,<5.0.0
+onnx>=1.16.0
+sentencepiece>=0.2.0
+protobuf>=5.0.0
+safetensors>=0.4.0

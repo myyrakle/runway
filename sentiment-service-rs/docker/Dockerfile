@@ -9,13 +9,17 @@
 #                        .so + cudart/cudnn + the .plan + tokenizer.json. No Python,
 #                        no PyTorch, no transformers, no onnxruntime.
 #
-# BUILD CONTEXT = the runway repo root (so both `sentiment-service/` and
-# `sentiment-service-rs/` are visible):
+# BUILD CONTEXT = this directory (sentiment-service-rs/). Self-contained: the engine
+# export/build scripts and their Python deps are vendored under scripts/, so there is
+# NO dependency on the sibling sentiment-service project.
+#   cd sentiment-service-rs
 #   docker buildx build --allow device=nvidia.com/gpu=all \
-#     -f sentiment-service-rs/docker/Dockerfile -t sentiment-rs:trt --load .
+#     -f docker/Dockerfile -t sentiment-rs:trt --load .
+# (or just `make docker-build`)
 #
-# Requires the same BuildKit CDI GPU setup as the Python tensorrt image (see
-# sentiment-service/docker/Dockerfile.sagemaker-cu128-tensorrt for the host prereqs).
+# Requires BuildKit CDI GPU setup on the build host:
+#   sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
+#   /etc/docker/daemon.json: {"features": {"cdi": true}}
 #
 # The .plan is locked to the build GPU architecture + TensorRT version, so the build
 # host GPU and the inference GPU must match.
@@ -59,15 +63,10 @@ ENV PYTHONUNBUFFERED=1 \
 RUN python -m pip install --no-cache-dir --upgrade pip \
     && python -m pip install --no-cache-dir torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
 
-# Reuse the Python service's pyproject + export/build scripts (build context = repo root).
-COPY sentiment-service/pyproject.toml sentiment-service/README.md ./sentiment-service/
-COPY sentiment-service/app ./sentiment-service/app
-COPY sentiment-service/scripts ./sentiment-service/scripts
-# Base deps (torch/transformers/...) + onnx for the export. NOT the [tensorrt] extra:
-# that pip-installs a different tensorrt-cu12 version and onnxruntime-gpu, neither of
-# which we want here. build_trt_engine.py imports the image's bundled `tensorrt`.
-RUN python -m pip install --no-cache-dir -e "./sentiment-service" \
-    && python -m pip install --no-cache-dir "onnx>=1.16.0"
+# Vendored, self-contained export/build scripts + their Python deps (NOT tensorrt:
+# the image's bundled tensorrt is used so the engine matches the runtime libnvinfer).
+COPY scripts ./scripts
+RUN python -m pip install --no-cache-dir -r scripts/requirements-build.txt
 
 # Put torch's bundled CUDA libs on the loader path (the image's TensorRT libs are
 # already registered by the base image).
@@ -83,8 +82,8 @@ RUN --device=nvidia.com/gpu=all \
       ldconfig && \
       export LD_LIBRARY_PATH="$(dirname "$(find / -name 'libcuda.so*' 2>/dev/null | head -n1)"):${LD_LIBRARY_PATH}" && \
       mkdir -p /build/artifacts && \
-      python sentiment-service/scripts/export_onnx.py --model-name "$MODEL_NAME" --output "$ONNX_MODEL_PATH" --max-length "$MAX_SEQ" && \
-      python sentiment-service/scripts/build_trt_engine.py --onnx "$ONNX_MODEL_PATH" --output "$TRT_ENGINE_PATH" --opt-batch "$INFERENCE_BATCH_SIZE" --max-batch "$INFERENCE_BATCH_SIZE" --max-seq "$MAX_SEQ" --fp16 && \
+      python scripts/export_onnx.py --model-name "$MODEL_NAME" --output "$ONNX_MODEL_PATH" --max-length "$MAX_SEQ" && \
+      python scripts/build_trt_engine.py --onnx "$ONNX_MODEL_PATH" --output "$TRT_ENGINE_PATH" --opt-batch "$INFERENCE_BATCH_SIZE" --max-batch "$INFERENCE_BATCH_SIZE" --max-seq "$MAX_SEQ" --fp16 && \
       python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('$MODEL_NAME').backend_tokenizer.save('$TOKENIZER_OUT')" && \
       rm -f "$ONNX_MODEL_PATH"; \
     fi
@@ -104,9 +103,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certifi
 ENV CUDA_PATH=/usr/local/cuda \
     TENSORRT_DIR=/usr
 
-COPY sentiment-service-rs/Cargo.toml sentiment-service-rs/build.rs ./
-COPY sentiment-service-rs/cpp ./cpp
-COPY sentiment-service-rs/src ./src
+COPY Cargo.toml Cargo.lock build.rs ./
+COPY cpp ./cpp
+COPY src ./src
 # Build the real TensorRT-linked binary.
 RUN cargo build --release --features trt \
     && cp target/release/sentiment-service-rs /usr/local/bin/sentiment-service-rs \

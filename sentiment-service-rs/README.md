@@ -42,30 +42,38 @@ TensorRT 실행 컨텍스트는 thread-safe가 아니므로 각 forward를 `Mute
 
 ## 빌드 & 실행
 
+이 프로젝트는 **자립형**입니다 — 엔진 export/build 스크립트(`scripts/`)와 그 Python
+의존성이 vendoring돼 있어, 형제 `sentiment-service` 디렉터리 없이 단독으로 빌드됩니다.
+모든 작업은 `make`로 감싸뒀습니다 (`make help` 참고).
+
 ### 로컬 (stub, GPU 불필요)
 
 ```bash
-# tokenizer.json을 한 번 생성 (transformers가 있는 아무 머신에서나):
-python -c "from transformers import AutoTokenizer; \
-  AutoTokenizer.from_pretrained('yangheng/deberta-v3-base-absa-v1.1').backend_tokenizer.save('artifacts/tokenizer.json')"
+make tokenizer        # artifacts/tokenizer.json 생성 (python+transformers 필요)
+make run              # CPU stub 백엔드로 :8080 기동 (STUB=1)
 
-TOKENIZER_PATH=artifacts/tokenizer.json STUB=1 cargo run
 curl -s localhost:8080/health
 curl -s -X POST localhost:8080/invocations -H 'content-type: application/json' \
   -d '{"texts":["great screen","awful battery"],"aspect":"overall"}'
 ```
 
+`make check` / `build` / `fmt` / `clippy` / `test` / `clean` 도 제공합니다.
+
 ### Docker (실제 TensorRT 이미지)
 
-빌드 컨텍스트는 **runway 레포 루트**여야 합니다 (`sentiment-service/`와
-`sentiment-service-rs/`가 모두 보여야 함 — 엔진 빌드 스테이지가 Python의 export/build
-스크립트를 재사용). Python `tensorrt` 이미지와 동일한 BuildKit CDI GPU 설정 필요.
+빌드 컨텍스트는 **이 디렉터리(`sentiment-service-rs/`)** 입니다. BuildKit CDI GPU 설정
+필요 (`sudo nvidia-ctk cdi generate ...` + daemon.json `{"features":{"cdi":true}}`).
 
 ```bash
-docker buildx build --allow device=nvidia.com/gpu=all \
-  -f sentiment-service-rs/docker/Dockerfile -t sentiment-rs:trt --load .
-docker run --gpus all -p 8080:8080 sentiment-rs:trt
+make docker-build     # = docker buildx build --allow device=... -f docker/Dockerfile -t sentiment-rs:trt --load .
+make docker-run       # = docker run --rm --gpus all -p 8080:8080 sentiment-rs:trt
+
+# 더 큰 배치 엔진:
+make docker-build INFERENCE_BATCH_SIZE=64 MAX_BATCH_TOKENS=32768
 ```
+
+GPU 호스트에서 `--features trt`로 직접 빌드·실행도 가능: `make build-trt` / `make run-trt`
+(엔진 `.plan`과 `tokenizer.json`이 `artifacts/`에 있어야 함, CUDA/TensorRT dev libs 필요).
 
 `.plan`은 빌드 GPU 아키텍처 + TensorRT 버전에 고정됩니다: 빌드 호스트 GPU와 추론 GPU가
 일치해야 합니다. 런타임 베이스의 Ubuntu/glibc는 TensorRT 빌더 이미지(`TRT_IMAGE`)의
