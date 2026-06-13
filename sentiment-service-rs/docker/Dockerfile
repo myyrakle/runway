@@ -25,10 +25,17 @@
 # host GPU and the inference GPU must match.
 
 ARG MODEL_NAME=yangheng/deberta-v3-base-absa-v1.1
+# TRT_IMAGE sets the TensorRT version for EVERYTHING: the engine is built with it, the
+# shim is compiled+linked against it, and the runtime libnvinfer is copied from it — so
+# they are always self-consistent. To match a Python deployment's inference speed, set
+# this to the nvcr tag whose bundled TensorRT EQUALS the Python image's
+# (`python -c "import tensorrt; print(tensorrt.__version__)"`). Different TRT versions
+# pick different kernels => different latency, even from the same ONNX.
 ARG TRT_IMAGE=nvcr.io/nvidia/tensorrt:25.05-py3
-# IMPORTANT: the runtime base's Ubuntu/glibc must match TRT_IMAGE's, or the Rust binary
-# (compiled in rust-builder against TRT_IMAGE's glibc) fails to load. nvcr TensorRT
-# 25.x is Ubuntu 24.04 (glibc 2.39) — keep these aligned if you change TRT_IMAGE.
+# CUDA_RUNTIME_IMAGE must be glibc/CUDA-compatible with TRT_IMAGE: same Ubuntu (the Rust
+# binary is compiled against TRT_IMAGE's glibc) and a CUDA major.minor that the TRT_IMAGE
+# TensorRT supports. nvcr 25.x is Ubuntu 24.04 + CUDA 12.8; if you bump TRT_IMAGE to a
+# CUDA-13 nvcr tag, switch this to a matching nvidia/cuda:13.* base.
 ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04
 # Engine + chunking batch. INFERENCE_BATCH_SIZE is used for BOTH the engine's
 # opt/max batch (build) AND the runtime chunk size, so they always match. To serve a
