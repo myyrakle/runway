@@ -154,7 +154,8 @@ COPY --from=engine-builder /usr/local/lib/python3.10/site-packages/tensorrt_libs
 # If a future model/engine needs cuDNN, re-add the nvidia/cudnn/lib copy + ld path entry.
 COPY --from=engine-builder /usr/local/lib/python3.10/site-packages/nvidia/cublas/lib /opt/program/libs/cublas
 COPY --from=engine-builder /usr/local/lib/python3.10/site-packages/nvidia/cuda_runtime/lib /opt/program/libs/cuda_runtime
-COPY --from=engine-builder /usr/local/lib/python3.10/site-packages/nvidia/cuda_nvrtc/lib /opt/program/libs/cuda_nvrtc
+# cuda_nvrtc (runtime kernel JIT) also omitted: verified this engine infers correctly
+# without it (DeBERTa fp16 uses no JIT-compiled tactics). Drops ~0.1GB.
 COPY --from=rust-builder /usr/local/bin/sentiment-service-rs /usr/local/bin/sentiment-service-rs
 COPY --from=engine-builder /build/artifacts/model.plan /opt/program/artifacts/model.plan
 COPY --from=engine-builder /build/artifacts/tokenizer.json /opt/program/artifacts/tokenizer.json
@@ -165,7 +166,7 @@ COPY --from=engine-builder /build/artifacts/tokenizer.json /opt/program/artifact
 # injected by --gpus at run time, so they're expected-missing here).
 RUN cd /opt/program/libs/tensorrt_libs \
     && rm -f libnvinfer_builder_resource* libnvonnxparser* libnvinfer_lean* libnvinfer_dispatch* libnvinfer_vc_plugin* 2>/dev/null || true; \
-    { for d in /opt/program/libs/tensorrt_libs /opt/program/libs/cublas /opt/program/libs/cuda_runtime /opt/program/libs/cuda_nvrtc; do echo "$d"; done; } > /etc/ld.so.conf.d/trt.conf \
+    { for d in /opt/program/libs/tensorrt_libs /opt/program/libs/cublas /opt/program/libs/cuda_runtime; do echo "$d"; done; } > /etc/ld.so.conf.d/trt.conf \
     && ldconfig \
     && missing="$(ldd /usr/local/bin/sentiment-service-rs | grep 'not found' | grep -vE 'libcuda|libnvidia' || true)" \
     && if [ -n "$missing" ]; then echo "MISSING NON-DRIVER LIBS:"; echo "$missing"; exit 1; fi
