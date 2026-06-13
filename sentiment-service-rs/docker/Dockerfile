@@ -31,7 +31,13 @@ ARG MAX_SEQ=512
 
 # ============================== 1. engine-builder ==============================
 # Mirrors sentiment-service's tensorrt build: fp32 ONNX export, TRT builds fp16.
-FROM python:3.10-slim AS engine-builder
+#
+# CRITICAL: build the engine with the SAME TensorRT that the runtime links, or
+# deserializeCudaEngine fails with a serialization-version mismatch. So this stage runs
+# on TRT_IMAGE (the same image rust-builder/runtime take libnvinfer from) and uses its
+# BUNDLED tensorrt — we deliberately do NOT pip-install tensorrt-cu12 (a different
+# version, and a 4.3GB wheel). We add only torch + transformers + onnx for the export.
+FROM ${TRT_IMAGE} AS engine-builder
 ARG MODEL_NAME
 ARG INFERENCE_BATCH_SIZE
 ARG MAX_SEQ
@@ -52,10 +58,15 @@ RUN python -m pip install --no-cache-dir --upgrade pip \
 COPY sentiment-service/pyproject.toml sentiment-service/README.md ./sentiment-service/
 COPY sentiment-service/app ./sentiment-service/app
 COPY sentiment-service/scripts ./sentiment-service/scripts
-RUN python -m pip install --no-cache-dir -e "./sentiment-service[tensorrt]"
+# Base deps (torch/transformers/...) + onnx for the export. NOT the [tensorrt] extra:
+# that pip-installs a different tensorrt-cu12 version and onnxruntime-gpu, neither of
+# which we want here. build_trt_engine.py imports the image's bundled `tensorrt`.
+RUN python -m pip install --no-cache-dir -e "./sentiment-service" \
+    && python -m pip install --no-cache-dir "onnx>=1.16.0"
 
-# Put torch's bundled CUDA libs + tensorrt_libs on the loader path for the builder.
-RUN python -c "import glob,os,site; dirs=[p for r in (site.getsitepackages()+[site.getusersitepackages()]) for p in glob.glob(os.path.join(r,'nvidia','*','lib'))+glob.glob(os.path.join(r,'tensorrt_libs'))]; open('/etc/ld.so.conf.d/cuda-trt-libs.conf','w').write('\n'.join(dirs)+'\n')" \
+# Put torch's bundled CUDA libs on the loader path (the image's TensorRT libs are
+# already registered by the base image).
+RUN python -c "import glob,os,site; dirs=[p for r in (site.getsitepackages()+[site.getusersitepackages()]) for p in glob.glob(os.path.join(r,'nvidia','*','lib'))]; open('/etc/ld.so.conf.d/torch-cuda-libs.conf','w').write('\n'.join(dirs)+'\n')" \
     && ldconfig
 
 ARG BUILD_ENGINE=1
