@@ -35,10 +35,12 @@ ARG TENSORRT_PIP=tensorrt-cu12==10.16.1.11
 # the shim in rust-builder. The shim uses only ABI-stable TensorRT 10.x API, so linking
 # against this image's TRT and running against TENSORRT_PIP's (same major 10) is safe.
 ARG TRT_IMAGE=nvcr.io/nvidia/tensorrt:25.05-py3
-# Runtime base: provides cudart/glibc. Must be the same Ubuntu as TRT_IMAGE (the Rust
-# binary is compiled against TRT_IMAGE's glibc — nvcr 25.x = Ubuntu 24.04). TensorRT's
-# own cuDNN/cuBLAS/cudart come from the TENSORRT_PIP wheel set copied into the image.
-ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04
+# Runtime base: minimal CUDA base (NO cudart/cudnn/cublas — those come from the
+# TENSORRT_PIP wheel set copied in, so we don't ship them twice). Just glibc + the
+# driver-injection setup. Must be the same Ubuntu as TRT_IMAGE (the Rust binary is
+# compiled against TRT_IMAGE's glibc — nvcr 25.x = Ubuntu 24.04). libcuda.so is injected
+# by `docker run --gpus` at run time.
+ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:12.8.0-base-ubuntu24.04
 # Engine + chunking batch. INFERENCE_BATCH_SIZE is used for BOTH the engine's
 # opt/max batch (build) AND the runtime chunk size, so they always match. To serve a
 # bigger batch, rebuild with e.g. --build-arg INFERENCE_BATCH_SIZE=64 and bump
@@ -141,22 +143,30 @@ ENV PYTHONUNBUFFERED=1 \
     PAD_TO_MULTIPLE_OF=8 \
     RUST_LOG=info
 
-# TensorRT 10.16 + the CUDA libs it links (cuDNN/cuBLAS/cudart), taken from the
-# engine-builder's pip install — the SAME .so set Python serves with, so the engine
-# loads against the exact TRT version that built it. The Rust binary comes from
-# rust-builder; the engine + tokenizer from engine-builder.
+# Copy ONLY the .so TensorRT inference needs — NOT torch's extra CUDA libs
+# (cufft/cusolver/cusparse/nccl/nvjitlink/cusparselt) that bloated the image. From the
+# pip 10.16 install: libnvinfer (+plugin) and the CUDA math libs TRT links/dlopens
+# (cuDNN, cuBLAS, cudart, nvrtc). cuDNN's sub-libs are dlopen'd lazily, so we copy each
+# whole lib/ dir, not individual files. The base image is cudnn-less to avoid duplication.
 COPY --from=engine-builder /usr/local/lib/python3.10/site-packages/tensorrt_libs /opt/program/libs/tensorrt_libs
-COPY --from=engine-builder /usr/local/lib/python3.10/site-packages/nvidia /opt/program/libs/nvidia
+COPY --from=engine-builder /usr/local/lib/python3.10/site-packages/nvidia/cudnn/lib /opt/program/libs/cudnn
+COPY --from=engine-builder /usr/local/lib/python3.10/site-packages/nvidia/cublas/lib /opt/program/libs/cublas
+COPY --from=engine-builder /usr/local/lib/python3.10/site-packages/nvidia/cuda_runtime/lib /opt/program/libs/cuda_runtime
+COPY --from=engine-builder /usr/local/lib/python3.10/site-packages/nvidia/cuda_nvrtc/lib /opt/program/libs/cuda_nvrtc
 COPY --from=rust-builder /usr/local/bin/sentiment-service-rs /usr/local/bin/sentiment-service-rs
 COPY --from=engine-builder /build/artifacts/model.plan /opt/program/artifacts/model.plan
 COPY --from=engine-builder /build/artifacts/tokenizer.json /opt/program/artifacts/tokenizer.json
 
-# Drop the build-only TRT tactic DB (~1GB, never used for inference), then register the
-# copied .so dirs with the loader.
-RUN find /opt/program/libs -name 'libnvinfer_builder_resource*' -delete 2>/dev/null || true; \
-    { echo /opt/program/libs/tensorrt_libs; for d in /opt/program/libs/nvidia/*/lib; do [ -d "$d" ] && echo "$d"; done; } > /etc/ld.so.conf.d/trt.conf \
+# Drop the parts of tensorrt_libs that inference never loads (build-only tactic DB ~1GB,
+# the ONNX parser, and the lean/dispatch/vc alternative runtimes), register the copied
+# .so dirs, and fail the build if a NON-driver lib is unresolved (libcuda/libnvidia-* are
+# injected by --gpus at run time, so they're expected-missing here).
+RUN cd /opt/program/libs/tensorrt_libs \
+    && rm -f libnvinfer_builder_resource* libnvonnxparser* libnvinfer_lean* libnvinfer_dispatch* libnvinfer_vc_plugin* 2>/dev/null || true; \
+    { for d in /opt/program/libs/tensorrt_libs /opt/program/libs/cudnn /opt/program/libs/cublas /opt/program/libs/cuda_runtime /opt/program/libs/cuda_nvrtc; do echo "$d"; done; } > /etc/ld.so.conf.d/trt.conf \
     && ldconfig \
-    && ldd /usr/local/bin/sentiment-service-rs | (grep -q 'not found' && { echo 'MISSING SHARED LIBS:'; ldd /usr/local/bin/sentiment-service-rs | grep 'not found'; exit 1; } || true)
+    && missing="$(ldd /usr/local/bin/sentiment-service-rs | grep 'not found' | grep -vE 'libcuda|libnvidia' || true)" \
+    && if [ -n "$missing" ]; then echo "MISSING NON-DRIVER LIBS:"; echo "$missing"; exit 1; fi
 
 EXPOSE 8080
 CMD ["sentiment-service-rs"]

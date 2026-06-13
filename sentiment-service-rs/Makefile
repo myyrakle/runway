@@ -16,7 +16,7 @@ TOKENIZER            ?= artifacts/tokenizer.json
 # compile the shim; CUDA_RUNTIME_IMAGE supplies cudart/glibc (same Ubuntu as TRT_IMAGE).
 TENSORRT_PIP         ?= tensorrt-cu12==10.16.1.11
 TRT_IMAGE            ?= nvcr.io/nvidia/tensorrt:25.05-py3
-CUDA_RUNTIME_IMAGE   ?= nvidia/cuda:12.8.0-cudnn-runtime-ubuntu24.04
+CUDA_RUNTIME_IMAGE   ?= nvidia/cuda:12.8.0-base-ubuntu24.04
 ENGINE               ?= artifacts/model.plan
 
 .DEFAULT_GOAL := help
