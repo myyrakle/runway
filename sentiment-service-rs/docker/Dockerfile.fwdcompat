@@ -140,4 +140,8 @@ RUN cd /opt/program/libs/tensorrt_libs \
     && if [ -n "$missing" ]; then echo "MISSING NON-DRIVER LIBS:"; echo "$missing"; exit 1; fi
 
 EXPOSE 8080
-CMD ["sentiment-service-rs"]
+# ENTRYPOINT (not CMD) so SageMaker's `docker run <image> serve` works: SageMaker always
+# launches an inference container with the single arg `serve`, which would REPLACE a CMD
+# and try to exec a nonexistent `serve` binary. As ENTRYPOINT, `serve` is appended as an
+# argv the binary harmlessly ignores (main() reads config from env, not args).
+ENTRYPOINT ["sentiment-service-rs"]

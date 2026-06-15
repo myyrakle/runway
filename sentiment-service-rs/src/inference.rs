@@ -147,6 +147,27 @@ impl Engine {
         let enc = self.tokenizer.encode_pairs(texts, aspect)?;
         let tokenize_ms = t0.elapsed().as_secs_f64() * 1000.0;
 
+        // Padding-waste audit: PAD tokens still cost GPU FLOPs (the mask only zeroes
+        // attention contributions). fill = real / padded; low fill => GPU time burned on
+        // padding => tighter token-budget chunking / outlier isolation pays off.
+        if timing_enabled() {
+            let real_tokens: i64 = enc.attention_mask.iter().map(|&m| m as i64).sum();
+            let padded = enc.batch * enc.seq;
+            let mean_real = real_tokens as f64 / enc.batch.max(1) as f64;
+            let fill = if padded > 0 {
+                real_tokens as f64 / padded as f64 * 100.0
+            } else {
+                0.0
+            };
+            tracing::info!(
+                batch = enc.batch,
+                seq = enc.seq,
+                mean_real_tokens = format!("{mean_real:.1}"),
+                fill_pct = format!("{fill:.1}"),
+                "run_chunk padding"
+            );
+        }
+
         let t1 = Instant::now();
         let logits = self
             .backend
