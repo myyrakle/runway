@@ -120,8 +120,12 @@ ENV PYTHONUNBUFFERED=1 \
 # into the default loader dirs. This is what lets cu128 run on an R470 host. On a host
 # whose driver is already new enough it is simply unused. (${LD_LIBRARY_PATH} expands the
 # base image's value so the injected /usr/local/nvidia/lib* dirs are preserved.)
+# cuda-compat stays FIRST (forward-compat libcuda must win); the app TRT/CUDA .so dirs
+# follow so libnvinfer.so.10 etc. resolve via LD_LIBRARY_PATH directly, not just the
+# ldconfig cache (the NVIDIA runtime can regenerate /etc/ld.so.cache at container start
+# and drop these app dirs -> `libnvinfer.so.10: cannot open shared object file`).
 COPY --from=cudacompat /usr/local/cuda/compat /opt/nvidia/cuda-compat
-ENV LD_LIBRARY_PATH=/opt/nvidia/cuda-compat:${LD_LIBRARY_PATH}
+ENV LD_LIBRARY_PATH=/opt/nvidia/cuda-compat:/opt/program/libs/tensorrt_libs:/opt/program/libs/cublas:/opt/program/libs/cuda_runtime:${LD_LIBRARY_PATH}
 
 # Inference-only .so set (see docker/Dockerfile for the rationale; cuDNN omitted).
 COPY --from=engine-builder /usr/local/lib/python3.10/site-packages/tensorrt_libs /opt/program/libs/tensorrt_libs

@@ -160,6 +160,15 @@ COPY --from=rust-builder /usr/local/bin/sentiment-service-rs /usr/local/bin/sent
 COPY --from=engine-builder /build/artifacts/model.plan /opt/program/artifacts/model.plan
 COPY --from=engine-builder /build/artifacts/tokenizer.json /opt/program/artifacts/tokenizer.json
 
+# Put the copied TensorRT/CUDA .so dirs on LD_LIBRARY_PATH directly. The ldconfig cache
+# below is built at image-build time, but the NVIDIA container runtime can re-run ldconfig
+# at container start (regenerating /etc/ld.so.cache from the base image's conf), which
+# drops these app dirs — so the binary failed at runtime with `libnvinfer.so.10: cannot
+# open shared object file` despite the build-time ldd check passing. An explicit
+# LD_LIBRARY_PATH resolves the libs regardless of cache state. (${LD_LIBRARY_PATH} keeps
+# the base image's injected /usr/local/nvidia/lib* dirs.)
+ENV LD_LIBRARY_PATH=/opt/program/libs/tensorrt_libs:/opt/program/libs/cublas:/opt/program/libs/cuda_runtime:${LD_LIBRARY_PATH}
+
 # Drop the parts of tensorrt_libs that inference never loads (build-only tactic DB ~1GB,
 # the ONNX parser, and the lean/dispatch/vc alternative runtimes), register the copied
 # .so dirs, and fail the build if a NON-driver lib is unresolved (libcuda/libnvidia-* are
