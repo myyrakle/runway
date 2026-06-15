@@ -52,8 +52,10 @@ impl AbsaTokenizer {
         Ok(Self { inner })
     }
 
-    /// Encode a batch of (text, aspect) pairs into padded int32 tensors.
-    pub fn encode_pairs(&self, texts: &[String], aspect: &str) -> Result<Encoded> {
+    /// Encode a batch of (text, aspect) pairs into padded int32 tensors. `aspects` is
+    /// parallel to `texts`, so each row is paired with its own aspect (one batch can
+    /// mix aspects). Use [`encode_batch`](Self::encode_batch) for a shared aspect.
+    pub fn encode_pairs(&self, texts: &[String], aspects: &[String]) -> Result<Encoded> {
         if texts.is_empty() {
             return Ok(Encoded {
                 input_ids: Vec::new(),
@@ -62,10 +64,16 @@ impl AbsaTokenizer {
                 seq: 0,
             });
         }
+        debug_assert_eq!(
+            texts.len(),
+            aspects.len(),
+            "encode_pairs requires one aspect per text"
+        );
 
         let inputs: Vec<EncodeInput> = texts
             .iter()
-            .map(|t| EncodeInput::Dual(t.clone().into(), aspect.to_string().into()))
+            .zip(aspects.iter())
+            .map(|(t, a)| EncodeInput::Dual(t.clone().into(), a.clone().into()))
             .collect();
 
         let encodings = self
@@ -101,4 +109,45 @@ impl AbsaTokenizer {
 pub fn load_or_fail(path: &str, max_length: usize, pad_to_multiple_of: usize) -> Result<AbsaTokenizer> {
     AbsaTokenizer::load(path, max_length, pad_to_multiple_of)
         .with_context(|| format!("tokenizer init failed for {path}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{token_id, write_fixture_tokenizer};
+
+    fn fixture() -> AbsaTokenizer {
+        let path = write_fixture_tokenizer("sentiment_rs_tok_encode_pairs.json");
+        AbsaTokenizer::load(path.to_str().unwrap(), 512, 0).unwrap()
+    }
+
+    #[test]
+    fn encode_pairs_applies_each_rows_own_aspect() {
+        let tk = fixture();
+        let texts = vec!["good".to_string(), "good".to_string()];
+        let aspects = vec!["battery".to_string(), "screen".to_string()];
+
+        let enc = tk.encode_pairs(&texts, &aspects).unwrap();
+
+        assert_eq!(enc.batch, 2);
+        // Layout per row: [CLS] good [SEP] <aspect> [SEP] -> aspect at column 3.
+        let aspect_col = 3;
+        let row0 = &enc.input_ids[0..enc.seq];
+        let row1 = &enc.input_ids[enc.seq..2 * enc.seq];
+        assert_eq!(row0[aspect_col], token_id("battery"));
+        assert_eq!(row1[aspect_col], token_id("screen"));
+    }
+
+    #[test]
+    fn encode_pairs_swapping_aspects_swaps_encoded_rows() {
+        let tk = fixture();
+        let texts = vec!["good".to_string(), "good".to_string()];
+
+        let a = tk
+            .encode_pairs(&texts, &["screen".to_string(), "battery".to_string()])
+            .unwrap();
+        let aspect_col = 3;
+        assert_eq!(a.input_ids[aspect_col], token_id("screen"));
+        assert_eq!(a.input_ids[a.seq + aspect_col], token_id("battery"));
+    }
 }

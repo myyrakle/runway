@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import unittest
 
+from pydantic import ValidationError
+
 from tests.fakes import install_fake_fastapi_modules, install_fake_ml_modules
 
 install_fake_ml_modules()
@@ -51,33 +53,31 @@ class InvocationTests(unittest.TestCase):
         main_module._get_variant = self.original_get_variant
 
     def test_invocations_batch_uses_same_batch_inference_path(self) -> None:
-        result = asyncio.run(
-            main_module._dispatch_invocation({"texts": ["a", "b"], "aspect": "battery"})
-        )
+        body = InvocationRequest(texts=["a", "b"], aspect="battery")
+        response = asyncio.run(main_module.invocations(body))
 
-        self.assertEqual(len(result["results"]), 2)
+        self.assertEqual(len(response.content["results"]), 2)
         self.assertEqual(self.model.batch_calls, [(["a", "b"], "battery")])
         self.assertEqual(self.model.single_calls, [])
 
     def test_invocations_instances_payload_uses_batch_inference_path(self) -> None:
-        result = asyncio.run(
-            main_module._dispatch_invocation(
-                {"instances": ["a", "b", "c"], "aspect": "screen"}
-            )
-        )
+        body = InvocationRequest(instances=["a", "b", "c"], aspect="screen")
+        response = asyncio.run(main_module.invocations(body))
 
-        self.assertEqual(len(result["results"]), 3)
+        self.assertEqual(len(response.content["results"]), 3)
         self.assertEqual(self.model.batch_calls, [(["a", "b", "c"], "screen")])
         self.assertEqual(self.model.single_calls, [])
 
     def test_invocations_is_batch_only(self) -> None:
-        # No texts/instances list -> rejected. A bare single `text` is no longer
-        # a valid /invocations payload; callers must send a batch.
+        # A bare single `text` is a valid payload shape but /invocations is batch-only,
+        # so the route rejects it; empty/missing payloads fail Pydantic validation.
         from fastapi import HTTPException
 
-        for body in ({}, {"text": "a"}, {"texts": []}):
-            with self.assertRaises(HTTPException):
-                asyncio.run(main_module._dispatch_invocation(body))
+        with self.assertRaises(HTTPException):
+            asyncio.run(main_module.invocations(InvocationRequest(text="a")))
+        for kwargs in ({}, {"texts": []}):
+            with self.assertRaises(ValidationError):
+                InvocationRequest(**kwargs)
         self.assertEqual(self.model.batch_calls, [])
         self.assertEqual(self.model.single_calls, [])
 

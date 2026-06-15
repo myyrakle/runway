@@ -65,7 +65,15 @@ def _argmax(tensor, dim=-1):
 
 
 def install_fake_ml_modules() -> types.ModuleType:
+    # Idempotent: tests import several modules that each call this, and re-creating the
+    # fake would mint new classes that fail cross-module identity checks (isinstance,
+    # assertRaises). Reuse the already-installed fake instead.
+    existing = sys.modules.get("torch")
+    if existing is not None and getattr(existing, "_is_fake", False):
+        return existing
+
     fake_torch = types.ModuleType("torch")
+    fake_torch._is_fake = True
     fake_torch.long = "long"
     fake_torch.float = "float"
     fake_torch.qint8 = "qint8"
@@ -95,7 +103,14 @@ def install_fake_ml_modules() -> types.ModuleType:
 
 
 def install_fake_fastapi_modules() -> None:
+    # Idempotent (see install_fake_ml_modules): a second FakeHTTPException class would
+    # not match one main.py already bound, breaking assertRaises across test files.
+    existing = sys.modules.get("fastapi")
+    if existing is not None and getattr(existing, "_is_fake", False):
+        return
+
     fake_fastapi = types.ModuleType("fastapi")
+    fake_fastapi._is_fake = True
 
     class FakeFastAPI:
         def __init__(self, *args, **kwargs) -> None:

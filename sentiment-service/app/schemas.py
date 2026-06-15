@@ -28,6 +28,13 @@ class BatchAnalyzeRequest(BaseModel):
     precision: Precision = Field(DEFAULT_PRECISION, description="Model precision variant")
 
 
+class Group(BaseModel):
+    """A single (text, aspect) pair, so one batch can mix aspects per item."""
+
+    text: str = Field(..., description="Text to analyze")
+    aspect: str = Field("overall", description="ABSA aspect / target for this text")
+
+
 class InvocationRequest(BaseModel):
     model_config = ConfigDict(
         json_schema_extra={
@@ -62,6 +69,12 @@ class InvocationRequest(BaseModel):
         max_length=MAX_BATCH_ITEMS,
         description="SageMaker-style batch texts to analyze",
     )
+    groups: list[Group] | None = Field(
+        None,
+        min_length=1,
+        max_length=MAX_BATCH_ITEMS,
+        description="Per-item (text, aspect) pairs, so one batch can mix aspects",
+    )
     aspect: str = Field("overall", description="ABSA aspect / target")
     precision: Precision = Field(DEFAULT_PRECISION, description="Model precision variant")
 
@@ -71,9 +84,12 @@ class InvocationRequest(BaseModel):
             self.text is not None,
             self.texts is not None,
             self.instances is not None,
+            self.groups is not None,
         ]
         if sum(provided) != 1:
-            raise ValueError("Provide exactly one of text, texts, or instances")
+            raise ValueError(
+                "Provide exactly one of text, texts, instances, or groups"
+            )
         return self
 
     def as_single_request(self) -> AnalyzeRequest:

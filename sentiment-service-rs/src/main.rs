@@ -7,6 +7,8 @@ mod engine;
 mod inference;
 mod routes;
 mod schemas;
+#[cfg(test)]
+mod test_support;
 mod tokenizer;
 
 use std::net::SocketAddr;

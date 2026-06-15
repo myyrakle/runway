@@ -1,7 +1,7 @@
 //! HTTP layer (axum). Endpoints mirror the Python service:
 //!   GET  /ping           health check (SageMaker)
 //!   GET  /health
-//!   POST /invocations    batch-or-single (text | texts | instances)
+//!   POST /invocations    batch-or-single (text | texts | instances | groups)
 //!   POST /analyze        single text
 //!   POST /analyze/batch  list of texts
 //!
@@ -105,33 +105,134 @@ async fn analyze_batch(
     run_batch(engine, req.texts, req.aspect).await
 }
 
-/// /invocations is batch-or-single: accept exactly one of text / texts / instances.
-async fn invocations(
-    State(engine): State<AppState>,
-    Json(req): Json<InvocationRequest>,
-) -> Response {
+async fn run_pairs(engine: AppState, texts: Vec<String>, aspects: Vec<String>) -> Response {
+    let result =
+        tokio::task::spawn_blocking(move || engine.analyze_pairs(&texts, &aspects)).await;
+    match result {
+        Ok(Ok(results)) => Json(BatchAnalyzeResponse { results }).into_response(),
+        Ok(Err(e)) => err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+        Err(e) => err(StatusCode::INTERNAL_SERVER_ERROR, format!("join error: {e}")),
+    }
+}
+
+/// What an /invocations body resolves to, independent of the HTTP layer.
+enum Dispatch {
+    Single { text: String, aspect: String },
+    Batch { texts: Vec<String>, aspect: String },
+    Pairs { texts: Vec<String>, aspects: Vec<String> },
+}
+
+/// Validate the "exactly one payload" rule and extract the work to run. Returns the
+/// FastAPI-style `detail` string on a validation failure. `aspect` (top-level) is used
+/// for the single/batch forms; the `groups` form carries a per-item aspect instead.
+fn plan_invocation(req: InvocationRequest) -> Result<Dispatch, String> {
     let provided = [
         req.text.is_some(),
         req.texts.is_some(),
         req.instances.is_some(),
+        req.groups.is_some(),
     ]
     .iter()
     .filter(|&&b| b)
     .count();
 
     if provided != 1 {
-        return err(
-            StatusCode::BAD_REQUEST,
-            "Provide exactly one of text, texts, or instances",
-        );
+        return Err("Provide exactly one of text, texts, instances, or groups".to_string());
     }
 
     if let Some(text) = req.text {
-        return run_single(engine, text, req.aspect).await;
+        return Ok(Dispatch::Single {
+            text,
+            aspect: req.aspect,
+        });
     }
-    let batch = req.texts.or(req.instances).unwrap();
-    if let Err(resp) = validate_batch_len(&engine, batch.len()) {
-        return resp;
+    if let Some(groups) = req.groups {
+        let texts = groups.iter().map(|g| g.text.clone()).collect();
+        let aspects = groups.iter().map(|g| g.aspect.clone()).collect();
+        return Ok(Dispatch::Pairs { texts, aspects });
     }
-    run_batch(engine, batch, req.aspect).await
+    let texts = req.texts.or(req.instances).unwrap();
+    Ok(Dispatch::Batch {
+        texts,
+        aspect: req.aspect,
+    })
+}
+
+/// /invocations accepts exactly one of text / texts / instances / groups.
+async fn invocations(
+    State(engine): State<AppState>,
+    Json(req): Json<InvocationRequest>,
+) -> Response {
+    match plan_invocation(req) {
+        Err(detail) => err(StatusCode::BAD_REQUEST, detail),
+        Ok(Dispatch::Single { text, aspect }) => run_single(engine, text, aspect).await,
+        Ok(Dispatch::Batch { texts, aspect }) => {
+            if let Err(resp) = validate_batch_len(&engine, texts.len()) {
+                return resp;
+            }
+            run_batch(engine, texts, aspect).await
+        }
+        Ok(Dispatch::Pairs { texts, aspects }) => {
+            if let Err(resp) = validate_batch_len(&engine, texts.len()) {
+                return resp;
+            }
+            run_pairs(engine, texts, aspects).await
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(json: &str) -> InvocationRequest {
+        serde_json::from_str(json).unwrap()
+    }
+
+    #[test]
+    fn plan_groups_flattens_to_parallel_texts_and_aspects() {
+        let req = parse(
+            r#"{"groups": [
+                {"text": "battery is bad", "aspect": "battery"},
+                {"text": "battery is bad", "aspect": "price"},
+                {"text": "screen is great", "aspect": "screen"}
+            ]}"#,
+        );
+        match plan_invocation(req).unwrap() {
+            Dispatch::Pairs { texts, aspects } => {
+                assert_eq!(
+                    texts,
+                    vec!["battery is bad", "battery is bad", "screen is great"]
+                );
+                assert_eq!(aspects, vec!["battery", "price", "screen"]);
+            }
+            _ => panic!("expected Pairs dispatch"),
+        }
+    }
+
+    #[test]
+    fn plan_rejects_groups_combined_with_texts() {
+        let req = parse(r#"{"texts": ["a"], "groups": [{"text": "b", "aspect": "x"}]}"#);
+        assert!(plan_invocation(req).is_err());
+    }
+
+    #[test]
+    fn plan_routes_texts_and_instances_to_batch() {
+        match plan_invocation(parse(r#"{"texts": ["a", "b"], "aspect": "battery"}"#)).unwrap() {
+            Dispatch::Batch { texts, aspect } => {
+                assert_eq!(texts, vec!["a", "b"]);
+                assert_eq!(aspect, "battery");
+            }
+            _ => panic!("expected Batch"),
+        }
+        match plan_invocation(parse(r#"{"instances": ["a"]}"#)).unwrap() {
+            Dispatch::Batch { texts, .. } => assert_eq!(texts, vec!["a"]),
+            _ => panic!("expected Batch from instances"),
+        }
+    }
+
+    #[test]
+    fn plan_rejects_empty_payload() {
+        assert!(plan_invocation(parse(r#"{}"#)).is_err());
+    }
 }

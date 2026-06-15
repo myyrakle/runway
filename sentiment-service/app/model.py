@@ -145,40 +145,52 @@ class DeBERTaABSA:
 
     def analyze(self, text: str, aspect: str = "overall") -> dict:
         """Single-text sentiment analysis (delegates to the batch chunk path)."""
-        return self._analyze_batch_chunk([text], aspect)[0]
+        return self._analyze_batch_chunk([text], [aspect])[0]
 
     def analyze_batch(self, texts: list[str], aspect: str = "overall") -> list[dict]:
-        """Batch sentiment analysis."""
+        """Batch sentiment analysis with one aspect applied to every text."""
         if not texts:
             return []
+        return self.analyze_pairs(texts, [aspect] * len(texts))
 
-        indexed_texts = list(enumerate(texts))
+    def analyze_pairs(self, texts: list[str], aspects: list[str]) -> list[dict]:
+        """Per-row sentiment analysis: each text is paired with its own aspect, so one
+        batch can mix aspects. `aspects` must be parallel to `texts`. Preserves input
+        order through the sort-by-length → chunk → forward → reorder pipeline."""
+        if not texts:
+            return []
+        if len(texts) != len(aspects):
+            raise ValueError("analyze_pairs requires one aspect per text")
+
+        # (original_index, text, aspect); the aspect travels with its text so a
+        # length sort cannot mismatch them, and original order is restored at the end.
+        indexed = list(zip(range(len(texts)), texts, aspects))
         if SORT_BATCH_BY_LENGTH:
-            indexed_texts.sort(key=lambda item: len(item[1]) + len(aspect))
+            indexed.sort(key=lambda item: len(item[1]) + len(item[2]))
 
         ordered_results: list[dict | None] = [None] * len(texts)
-        for chunk in self._iter_inference_chunks(indexed_texts, aspect):
-            chunk_indices = [index for index, _ in chunk]
-            chunk_texts = [text for _, text in chunk]
-            chunk_results = self._analyze_batch_chunk(chunk_texts, aspect)
+        for chunk in self._iter_inference_chunks(indexed):
+            chunk_indices = [index for index, _, _ in chunk]
+            chunk_texts = [text for _, text, _ in chunk]
+            chunk_aspects = [aspect for _, _, aspect in chunk]
+            chunk_results = self._analyze_batch_chunk(chunk_texts, chunk_aspects)
             for index, result in zip(chunk_indices, chunk_results):
                 ordered_results[index] = result
         return [result for result in ordered_results if result is not None]
 
     def _iter_inference_chunks(
         self,
-        indexed_texts: list[tuple[int, str]],
-        aspect: str,
+        indexed_texts: list[tuple[int, str, str]],
     ):
         if MAX_BATCH_TOKENS <= 0:
             for start in range(0, len(indexed_texts), INFERENCE_BATCH_SIZE):
                 yield indexed_texts[start : start + INFERENCE_BATCH_SIZE]
             return
 
-        chunk: list[tuple[int, str]] = []
+        chunk: list[tuple[int, str, str]] = []
         chunk_max_tokens = 0
         for item in indexed_texts:
-            item_tokens = self._estimate_sequence_tokens(item[1], aspect)
+            item_tokens = self._estimate_sequence_tokens(item[1], item[2])
             next_max_tokens = max(chunk_max_tokens, item_tokens)
             next_size = len(chunk) + 1
             would_exceed_size = next_size > INFERENCE_BATCH_SIZE
@@ -200,9 +212,9 @@ class DeBERTaABSA:
         # tokenizer still performs exact truncation/padding for the model input.
         return min(MAX_LENGTH, len(text) + len(aspect) + 3)
 
-    def _analyze_batch_chunk(self, texts: list[str], aspect: str) -> list[dict]:
-        """Run one bounded model forward pass."""
-        inputs = self._tokenize(texts, [aspect] * len(texts))
+    def _analyze_batch_chunk(self, texts: list[str], aspects: list[str]) -> list[dict]:
+        """Run one bounded model forward pass over parallel (text, aspect) rows."""
+        inputs = self._tokenize(texts, aspects)
 
         with torch.inference_mode():
             outputs = self.model(**inputs)

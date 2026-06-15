@@ -118,14 +118,27 @@ async def _run_batch(texts: list[str], aspect: str, precision: str) -> dict:
     return {"results": results}
 
 
+async def _run_pairs(texts: list[str], aspects: list[str], precision: str) -> dict:
+    model = await _resolve_model(precision)
+    results = await run_in_threadpool(model.analyze_pairs, texts, aspects)
+    return {"results": results}
+
+
 @app.post("/invocations")
 async def invocations(body: InvocationRequest) -> JSONResponse:
-    """/invocations is batch-only: accept `texts` (or its `instances` alias)."""
+    """/invocations is batch-only: accept `texts` / `instances`, or `groups` for
+    per-item (text, aspect) pairs so one batch can mix aspects. Results are returned
+    flattened in input order."""
+    if body.groups is not None:
+        texts = [group.text for group in body.groups]
+        aspects = [group.aspect for group in body.groups]
+        return JSONResponse(await _run_pairs(texts, aspects, body.precision))
+
     batch = body.texts if body.texts is not None else body.instances
     if batch is None:
         raise HTTPException(
             status_code=400,
-            detail="Batch texts required: provide `texts` or `instances`",
+            detail="Batch texts required: provide `texts`, `instances`, or `groups`",
         )
     return JSONResponse(await _run_batch(batch, body.aspect, body.precision))
 
