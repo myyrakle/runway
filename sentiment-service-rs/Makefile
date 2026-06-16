@@ -5,9 +5,16 @@
 
 IMAGE                ?= sentiment-rs:trt
 MODEL_NAME           ?= yangheng/deberta-v3-base-absa-v1.1
-INFERENCE_BATCH_SIZE ?= 32
+INFERENCE_BATCH_SIZE ?= 64
 MAX_SEQ              ?= 512
-MAX_BATCH_TOKENS     ?= 16384
+# Engine opt seq length: TensorRT tunes kernels around this. Set to 512 because the real
+# workload truncates ~74% of inputs to MAX_LENGTH (p50 token len ~641), so most forwards
+# run at seq=512 — tuning kernels there is the dominant case. (Python used the script
+# default 256, which mis-tuned for a length that rarely occurs.)
+OPT_SEQ             ?= 512
+# >= INFERENCE_BATCH_SIZE * MAX_SEQ so a full 64-item chunk runs in ONE forward pass
+# (not re-chunked by the token budget). Worst-case forward is then 64x512 (~3.5GB on T4).
+MAX_BATCH_TOKENS     ?= 32768
 PORT                 ?= 8080
 TOKENIZER            ?= artifacts/tokenizer.json
 # TENSORRT_PIP pins the TensorRT version that builds AND serves the engine — set to the
@@ -87,6 +94,7 @@ docker-build:
 	  --build-arg MODEL_NAME=$(MODEL_NAME) \
 	  --build-arg INFERENCE_BATCH_SIZE=$(INFERENCE_BATCH_SIZE) \
 	  --build-arg MAX_SEQ=$(MAX_SEQ) \
+	  --build-arg OPT_SEQ=$(OPT_SEQ) \
 	  --build-arg MAX_BATCH_TOKENS=$(MAX_BATCH_TOKENS) \
 	  -f docker/Dockerfile -t $(IMAGE) --load .
 
@@ -100,6 +108,7 @@ docker-build-fwdcompat:
 	  --build-arg MODEL_NAME=$(MODEL_NAME) \
 	  --build-arg INFERENCE_BATCH_SIZE=$(INFERENCE_BATCH_SIZE) \
 	  --build-arg MAX_SEQ=$(MAX_SEQ) \
+	  --build-arg OPT_SEQ=$(OPT_SEQ) \
 	  --build-arg MAX_BATCH_TOKENS=$(MAX_BATCH_TOKENS) \
 	  -f docker/Dockerfile.fwdcompat -t $(IMAGE_FWDCOMPAT) --load .
 docker-run:

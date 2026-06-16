@@ -30,15 +30,23 @@ ARG CUDA_RUNTIME_IMAGE=nvidia/cuda:12.8.0-base-ubuntu24.04
 # the cu128 wheels (forward compat is keyed to the toolkit version). Keep the Ubuntu in
 # step with CUDA_RUNTIME_IMAGE.
 ARG CUDA_COMPAT_IMAGE=nvidia/cuda:12.8.0-base-ubuntu24.04
-ARG INFERENCE_BATCH_SIZE=32
+ARG INFERENCE_BATCH_SIZE=64
 ARG MAX_SEQ=512
-ARG MAX_BATCH_TOKENS=16384
+# >= INFERENCE_BATCH_SIZE * MAX_SEQ so a full 64-item chunk runs in ONE forward pass
+# instead of being re-chunked by the token budget. Worst-case forward 64x512 (~3.5GB).
+ARG MAX_BATCH_TOKENS=32768
+# Engine optimization seq length. TensorRT tunes kernels for the OPT shape. Set to 512:
+# the real workload truncates ~74% of inputs to MAX_LENGTH (p50 token len ~641), so most
+# forwards run at seq=512 and that's the case worth tuning. (Python used the script
+# default 256 — mis-tuned for a length that rarely occurs.) max-seq=512 is the upper bound.
+ARG OPT_SEQ=512
 
 # ============================== 1. engine-builder ==============================
 FROM python:3.10-slim AS engine-builder
 ARG MODEL_NAME
 ARG INFERENCE_BATCH_SIZE
 ARG MAX_SEQ
+ARG OPT_SEQ
 ARG TENSORRT_PIP
 WORKDIR /build
 
@@ -67,7 +75,7 @@ RUN --device=nvidia.com/gpu=all \
       export LD_LIBRARY_PATH="$(dirname "$(find / -name 'libcuda.so*' 2>/dev/null | head -n1)"):${LD_LIBRARY_PATH}" && \
       mkdir -p /build/artifacts && \
       python scripts/export_onnx.py --model-name "$MODEL_NAME" --output "$ONNX_MODEL_PATH" --max-length "$MAX_SEQ" && \
-      python scripts/build_trt_engine.py --onnx "$ONNX_MODEL_PATH" --output "$TRT_ENGINE_PATH" --opt-batch "$INFERENCE_BATCH_SIZE" --max-batch "$INFERENCE_BATCH_SIZE" --max-seq "$MAX_SEQ" --fp16 && \
+      python scripts/build_trt_engine.py --onnx "$ONNX_MODEL_PATH" --output "$TRT_ENGINE_PATH" --opt-batch "$INFERENCE_BATCH_SIZE" --max-batch "$INFERENCE_BATCH_SIZE" --opt-seq "$OPT_SEQ" --max-seq "$MAX_SEQ" --fp16 && \
       python -c "from transformers import AutoTokenizer; AutoTokenizer.from_pretrained('$MODEL_NAME').backend_tokenizer.save('$TOKENIZER_OUT')" && \
       rm -f "$ONNX_MODEL_PATH"; \
     fi
